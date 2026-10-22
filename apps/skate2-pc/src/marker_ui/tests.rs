@@ -615,8 +615,8 @@ fn original_signup_poster_lays_out_the_tutorial_challenge() {
     let text=|clip: &mut Clip| clip.text.as_deref().map(String::from_utf16_lossy);
     // m_1a_03's poster natives, as the core's sign-up test reads them.
     let view=PosterView {
-        title:PosterText {text:"ID_CHALLENGE_M_1A_03_TUTORIAL_FLIPTRICKS_TITLE".into(),formatted:true,dmo:None},
-        description:PosterText {text:"ID_CHALLENGE_M_1A_03_TUTORIAL_FLIPTRICKS_DESCRIPTION".into(),formatted:true,dmo:None},
+        title:PosterText {text:"ID_CHALLENGE_M_1A_03_TUTORIAL_FLIPTRICKS_TITLE".into(),formatted:true},
+        description:PosterText {text:"ID_CHALLENGE_M_1A_03_TUTORIAL_FLIPTRICKS_DESCRIPTION".into(),formatted:true},
         cash:300,
         description_enabled:true,
         tutorial_nis:Some("ID_CIC_VIEW_FLIP_TRICKS".into()),
@@ -1304,7 +1304,7 @@ fn original_party_play_end_screens_build() {
         options:EndChallengeOptions {win:true,throwdown,challenge:0,screen},
         leaderboard:leaderboard.clone(),
         second:leaderboard.clone(),
-        stance_regular:true, team_totals:[0;2],
+        stance_regular:true, team_totals:[0;2], online:None,
     };
     let title=MissionTitle::Missing;
     let mut spin=Spin::default();
@@ -1350,7 +1350,7 @@ fn original_failed_small_screen_builds() {
         options:EndChallengeOptions {win:false,throwdown:results::throwdown::NONE,challenge:0,screen:results::screen::FAILED_SMALL},
         leaderboard:results::LeaderboardState::default().round,
         second:results::LeaderboardState::default().round_second,
-        stance_regular:true, team_totals:[0;2],
+        stance_regular:true, team_totals:[0;2], online:None,
     };
     let text=|clip:&mut clips::Clip,path:&[&str]| clip.named(path).unwrap().text.clone().map(|t| String::from_utf16_lossy(&t));
     let x=|menu:&clips::Clip,name:&str| menu.children.values().find(|c| c.entry.name.as_deref()==Some(name)).unwrap().entry.matrix.tx;
@@ -1404,7 +1404,7 @@ fn original_end_challenge_small_screen_builds() {
         options:EndChallengeOptions {win:true,throwdown:results::throwdown::NONE,challenge:0,screen:results::screen::RESULTS_SMALL},
         leaderboard:results::LeaderboardState::default().round,
         second:results::LeaderboardState::default().round_second,
-        stance_regular:true, team_totals:[0;2],
+        stance_regular:true, team_totals:[0;2], online:None,
     };
     let text=|clip:&mut clips::Clip,path:&[&str]| clip.named(path).unwrap().text.clone().map(|t| String::from_utf16_lossy(&t));
     let mut random=apt_random::AptRandom::new();

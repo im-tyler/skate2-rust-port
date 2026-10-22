@@ -327,7 +327,16 @@ mod tests {
                     Screen::StartHub => self.hub.link(assets).unwrap(),
                     Screen::Options => self.options.link(assets, None).unwrap(),
                     Screen::MusicPlayer => self.player.link(assets).unwrap(),
-                    Screen::MainMenu | Screen::Extras => unreachable!("not part of this fixture"),
+                    Screen::MainMenu
+                    | Screen::Extras
+                    | Screen::ReplayEditor
+                    | Screen::ReplayFootage
+                    | Screen::OnlineOptions
+                    | Screen::SkateReelGeneral
+                    | Screen::SkateReelPhoto
+                    | Screen::TrickGuide
+                    | Screen::Contacts
+                    | Screen::SkateProfile => unreachable!("not part of this fixture"),
                 }
             }
             if self.player.take_letterbox_off() {

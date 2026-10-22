@@ -539,6 +539,7 @@ fn ported_effects_validate_and_draw_on_an_available_adapter() {
                 })
                 .create_view(&wgpu::TextureViewDescriptor::default()),
         ),
+        main_target: super::super::main_target::MainTarget::new(&device, format).texture(),
     };
     let first_mesh = builder
         .upload_mesh(&lit_triangle())
