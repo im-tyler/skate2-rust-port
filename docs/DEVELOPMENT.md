@@ -26,6 +26,22 @@ cargo run --release -p skate2-pc -- --inventory-render-assets
 cargo run -p skate2-symbols -- $env:SKATE2_MAP_FILE
 ```
 
+## Building on macOS
+
+The PC app builds on Apple Silicon with Homebrew's SDL3 linked dynamically
+(the Windows and Linux builds keep building SDL3 statically from source; see
+the platform sections of `apps/skate2-pc/Cargo.toml`):
+
+```sh
+brew install sdl3
+cargo build --release -p skate2-pc
+SKATE2_GAME_ROOT='<folder of default.xex>' target/release/skate2-pc
+```
+
+Without `SKATE2_GAME_ROOT` the game shows the same `.xex` file dialog as on
+Windows and remembers the folder in `config.json`. Pads go through the SDL3
+platform; audio through cpal (CoreAudio).
+
 ## Running the game
 
 `skate2-pc.exe` with no arguments is a player's launch: the quiet game, asking for the game's

@@ -19,7 +19,6 @@ jpeg-encoder = "=0.7.1"
 jpeg-decoder = { version = "=0.3.2", default-features = false }
 rayon = "=1.12.0"
 chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
-sdl3 = { version = "=0.20.0", features = ["build-from-source-static"] }
 rfd = { version = "=0.17.2", default-features = false }
 
 [build-dependencies]
@@ -29,6 +28,15 @@ sha2 = "=0.10.9"
 
 [lints]
 workspace = true
+
+# Windows builds SDL3 statically from source; macOS links Homebrew's SDL3
+# dynamically through pkg-config (the brew formula ships no static library),
+# so each platform gets the SDL3 it can actually link.
+[target.'cfg(not(any(target_os = "macos", target_os = "linux")))'.dependencies]
+sdl3 = { version = "=0.20.0", features = ["build-from-source-static"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+sdl3 = { version = "=0.20.0" }
 
 [target.'cfg(windows)'.dependencies]
 xinput = { package = "thindx-xinput", version = "=0.0.0-2024-02-04" }
