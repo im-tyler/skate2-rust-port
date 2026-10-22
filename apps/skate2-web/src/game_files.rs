@@ -284,6 +284,8 @@ pub(crate) struct AssetsReport {
     /// Step two's proof: one whole entry read out of `db.big` through ranged
     /// requests, RefPack-expanded if it was stored compressed.
     pub(crate) entry_read: String,
+    /// Step three's proof: the Vault pair's database summary.
+    pub(crate) vault_line: String,
 }
 
 /// One parsed archive: its path and a sample of its entries.
@@ -345,43 +347,81 @@ pub(crate) async fn inspect<S: ByteSource + ?Sized>(source: &S) -> AssetsReport 
         });
     }
     // Step two: one whole entry out of the Vault database, over ranges only.
-    let entry_read = match open_remote_archive(source, "data/db/db.big").await {
-        Ok((archive, data_path)) => {
-            let named = archive
-                .entries
-                .iter()
-                .find(|entry| matches!(&entry.key, skate2_formats::big::BigEntryKey::Name(_)));
-            match named {
-                Some(entry) => {
-                    let name = match &entry.key {
-                        skate2_formats::big::BigEntryKey::Name(name) => name.clone(),
-                        skate2_formats::big::BigEntryKey::Hash(hash) => format!("{hash:#010x}"),
-                    };
-                    match read_remote_entry(source, &data_path, entry).await {
-                        Ok(bytes) => format!(
-                            "{name}: {} stored → {} bytes{}",
-                            entry.stored_size,
-                            bytes.len(),
-                            if entry.stored_size < entry.unpacked_size {
-                                ", RefPack"
-                            } else {
-                                ""
-                            }
-                        ),
-                        Err(problem) => format!("{name}: {problem}"),
-                    }
-                }
-                None => "db.big holds no named entry to read".to_owned(),
-            }
-        }
-        Err(problem) => format!("db.big remote open failed: {problem}"),
-    };
+    // Step three: that entry's Vault parsed — types, classes, definitions.
+    let (entry_read, vault_line) = db_proof(source).await;
     AssetsReport {
         found,
         missing,
         parsed,
         entry_read,
+        vault_line,
     }
+}
+
+/// Steps two and three's proofs from one opened `db.big`: its first named
+/// entry read whole over ranges, and the Vault pair's parsed summary.
+async fn db_proof<S: ByteSource + ?Sized>(source: &S) -> (String, String) {
+    let Ok(db) = RemoteArchive::open(source, "data/db/db.big").await else {
+        return (
+            "db.big remote open failed".to_owned(),
+            "db.big remote open failed".to_owned(),
+        );
+    };
+    let named = db
+        .archive
+        .entries
+        .iter()
+        .find(|entry| matches!(&entry.key, skate2_formats::big::BigEntryKey::Name(_)));
+    let entry_read = match named {
+        Some(entry) => {
+            let name = match &entry.key {
+                skate2_formats::big::BigEntryKey::Name(name) => name.clone(),
+                skate2_formats::big::BigEntryKey::Hash(hash) => format!("{hash:#010x}"),
+            };
+            match db.read_entry_by_name(source, &name).await {
+                Ok(bytes) => format!(
+                    "{name}: {} stored → {} bytes{}",
+                    entry.stored_size,
+                    bytes.len(),
+                    if entry.stored_size < entry.unpacked_size {
+                        ", RefPack"
+                    } else {
+                        ""
+                    }
+                ),
+                Err(problem) => format!("{name}: {problem}"),
+            }
+        }
+        None => "db.big holds no named entry to read".to_owned(),
+    };
+    let vault_line = match crate::vault::inspect_vault(source, &db, "data\\db\\skater.vlt").await {
+        Ok(summary) => vault_line(&summary),
+        Err(problem) => format!("skater.vlt: {problem}"),
+    };
+    (entry_read, vault_line)
+}
+
+/// The panel's Vault line from a parsed summary.
+fn vault_line(summary: &crate::vault::VaultSummary) -> String {
+    let gravity = f32::from_bits(summary.physics_words[1]);
+    let names = summary
+        .class_names
+        .iter()
+        .filter(|name| matches!(name.as_str(), "physics" | "fe" | "characters_marquee"))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    format!(
+        "{} types, {} classes ({} named, e.g. {}), {} definitions; physics.default gravity {} ({:#010x}); needs {}",
+        summary.types.len(),
+        summary.classes,
+        summary.class_names.len(),
+        names,
+        summary.definitions,
+        gravity,
+        summary.physics_words[1],
+        summary.dependencies.join(", ")
+    )
 }
 
 /// Whether the bytes begin like a BIG table at all, so a data-only `.big`
@@ -405,30 +445,59 @@ fn header_u32(bytes: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_be_bytes([field[0], field[1], field[2], field[3]]))
 }
 
-/// The table of one mounted archive, read as ranges: sixteen bytes decide
-/// whether the `.big` itself begins a table (and how large it is) or whether
-/// the table sits in its `.bh` sibling, and only the table's own bytes are
-/// fetched. Returns the parsed archive and the path its entry offsets refer
-/// to (the `.big`).
-pub(crate) async fn open_remote_archive<S: ByteSource + ?Sized>(
-    source: &S,
-    path: &str,
-) -> Result<(BigArchive, String), String> {
-    let header = source.read_range(path, 0..16).await?;
-    if table(&header).is_some() {
-        // `count` sits at 8 and `header_size` at 12 in the named header.
-        let header_size =
-            u64::from(header_u32(&header, 12).ok_or("header too short for its size")?);
-        let table_bytes = source.read_range(path, 0..header_size).await?;
+/// One opened remote archive: its parsed table and the data file the entry
+/// offsets refer to (the `.big`, also when a `.bh` sibling held the table).
+pub(crate) struct RemoteArchive {
+    /// The parsed entry table.
+    pub(crate) archive: BigArchive,
+    /// The path entry offsets refer into.
+    pub(crate) data_path: String,
+}
+
+impl RemoteArchive {
+    /// Opens one archive's table with ranged reads: sixteen bytes decide
+    /// whether the `.big` itself begins a table (and how large it is) or
+    /// whether the table sits in its `.bh` sibling.
+    pub(crate) async fn open<S: ByteSource + ?Sized>(
+        source: &S,
+        path: &str,
+    ) -> Result<Self, String> {
+        let header = source.read_range(path, 0..16).await?;
+        if table(&header).is_some() {
+            // `count` sits at 8 and `header_size` at 12 in the named header.
+            let header_size =
+                u64::from(header_u32(&header, 12).ok_or("header too short for its size")?);
+            let table_bytes = source.read_range(path, 0..header_size).await?;
+            let archive =
+                BigArchive::parse(&table_bytes).map_err(|error| format!("{path}: {error}"))?;
+            return Ok(Self {
+                archive,
+                data_path: path.to_owned(),
+            });
+        }
+        let header_path = path.replace(".big", ".bh");
+        let table_bytes = source.read(&header_path).await?;
         let archive =
-            BigArchive::parse(&table_bytes).map_err(|error| format!("{path}: {error}"))?;
-        return Ok((archive, path.to_owned()));
+            BigArchive::parse(&table_bytes).map_err(|error| format!("{header_path}: {error}"))?;
+        Ok(Self {
+            archive,
+            data_path: path.to_owned(),
+        })
     }
-    let header_path = path.replace(".big", ".bh");
-    let table_bytes = source.read(&header_path).await?;
-    let archive =
-        BigArchive::parse(&table_bytes).map_err(|error| format!("{header_path}: {error}"))?;
-    Ok((archive, path.to_owned()))
+
+    /// One entry's bytes by its stored name, read over ranges.
+    pub(crate) async fn read_entry_by_name<S: ByteSource + ?Sized>(
+        &self,
+        source: &S,
+        name: &str,
+    ) -> Result<Vec<u8>, String> {
+        let entry = self
+            .archive
+            .find_path(name)
+            .or_else(|| self.archive.find_path(&name.replace('\\', "/")))
+            .ok_or_else(|| "no such entry".to_owned())?;
+        read_remote_entry(source, &self.data_path, entry).await
+    }
 }
 
 /// One entry's unpacked bytes from a ranged source, with the native mount's

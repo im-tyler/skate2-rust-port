@@ -17,6 +17,8 @@ mod scene;
 
 #[cfg(target_arch = "wasm32")]
 mod game_files;
+#[cfg(target_arch = "wasm32")]
+mod vault;
 
 use input::{PadSource, WebPadPlatform};
 use scene::{PlazaScene, PresentProblem};
@@ -329,6 +331,7 @@ async fn run_assets_report<S: game_files::ByteSource>(source: S) {
         missing,
         parsed,
         entry_read,
+        vault_line,
     } = game_files::inspect(&source).await;
     let Some(document) = web_sys::window().and_then(|window| window.document()) else {
         return;
@@ -370,6 +373,10 @@ async fn run_assets_report<S: game_files::ByteSource>(source: S) {
         }
         // Step two's proof line: the ranged entry read.
         if let Some(node) = row(&format!("ranged read: {entry_read}")) {
+            archives.append_child(&node).ok();
+        }
+        // Step three's proof line: the Vault database itself.
+        if let Some(node) = row(&format!("vault: {vault_line}")) {
             archives.append_child(&node).ok();
         }
     }
