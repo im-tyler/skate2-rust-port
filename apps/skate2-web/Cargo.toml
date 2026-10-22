@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 skate2-core = { path = "../../crates/skate2-core" }
+skate2-formats = { path = "../../crates/skate2-formats" }
 wgpu = "=30.0.1"
 winit = "=0.29.15"
 
@@ -23,15 +24,24 @@ wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "=0.4.79"
 js-sys = "=0.3.106"
 web-sys = { version = "=0.3.106", features = [
+    "Blob",
     "Document",
     "Element",
+    "Event",
+    "File",
+    "FileList",
     "Gamepad",
     "GamepadButton",
     "GamepadMappingType",
     "HtmlCanvasElement",
+    "HtmlInputElement",
+    "Location",
     "Navigator",
     "Node",
     "Performance",
+    "Request",
+    "RequestInit",
+    "Response",
     "Window",
 ] }
 console_error_panic_hook = "=0.1.7"

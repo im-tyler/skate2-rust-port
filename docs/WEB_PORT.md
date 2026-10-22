@@ -16,6 +16,7 @@ blocks a proper port.
 | Non-WASM-compatible code gated or replaced | done for the test scene (details below) |
 | Build + serve workflow (trunk) | done — `trunk build --release` / `trunk serve` |
 | Keyboard mapped to the controller input system | done — `XboxPadSample`s from ramped keys, unit-tested |
+| Game bytes in the browser (asset step one) | done — picker and `?http=` sources; all 20 mounted archives found, `globallocators.big` and `db.big` tables parsed in WASM against a real dump |
 | Real renderer / session / original assets in the browser | not started — see the blockers below |
 
 ## Building and running
@@ -74,6 +75,14 @@ wasm32-unknown-unknown targets.
   use; browser Y-down is negated). Firefox's axes-4/5 triggers are folded in.
   Vibration is tracked for the debug HUD; browser rumble
   (`GamepadHapticActuator`) is future work.
+- `src/game_files.rs` — asset step one: the page's byte sources for the
+  game's files. A folder picker (`webkitdirectory`) keeps the player's own
+  dump in their browser, and `?http=<base>` fetches from a served copy
+  (the verification route and the shape of the future streaming option).
+  The assets panel checks all twenty mounted archive paths and parses the
+  two smallest self-contained tables (`globallocators`, `db` — a `Viv4`
+  archive's `.bh` is read when the `.big` is data only) through the real
+  `skate2_formats` parser in WASM.
 
 ### Keyboard mapping
 
@@ -161,4 +170,8 @@ camera, which clipped every triangle and left only the clear color — a
 reminder that "the canvas presents" is not "the scene renders". The `fps`
 counter needs a visible, focused tab — under headless virtual time the
 rAF-driven winit loop does not tick, which is a testing artifact, not a scene
-problem.
+problem. The assets panel is verified the same way: with `?http=` aimed at a
+served extracted dump it reports 20/20 archives and parses
+`globallocators.big` (18 entries) and `db.big` (`skater.vlt`/`.bin`,
+`ChallengeCore.vlt`/`.bin`) in WASM; the picker needs a human's folder choice
+and so is hand-tested.

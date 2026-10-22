@@ -15,6 +15,9 @@
 mod input;
 mod scene;
 
+#[cfg(target_arch = "wasm32")]
+mod game_files;
+
 use input::{PadSource, WebPadPlatform};
 use scene::{PlazaScene, PresentProblem};
 use skate2_core::XboxPadSample;
@@ -200,6 +203,9 @@ pub fn start() -> Result<(), wasm_bindgen::JsValue> {
         .ok_or_else(|| js_value("the #skate2-canvas canvas is missing"))?
         .dyn_into::<web_sys::HtmlCanvasElement>()
         .map_err(|_| js_value("#skate2-canvas is not a canvas"))?;
+    // The game-data panel arms independently of the GPU: it works in every
+    // browser, with or without WebGPU.
+    arm_assets_panel();
     // Say it plainly before wgpu's adapter request fails obscurely.
     let gpu = js_sys::Reflect::get(
         &(window.navigator().into()),
@@ -242,6 +248,129 @@ fn spawn_event_loop(
     event_loop.spawn(move |event, target| {
         app.handle_event(event, target);
     });
+}
+
+/// Arms the game-data panel (`docs/WEB_PORT.md`, asset pipeline step one):
+/// the `?http=<base>` source when the page carries one, and a folder picker
+/// that keeps the player's dump in their browser. The event closures live as
+/// long as the page through the keepalive below — no `forget()` leaks.
+#[cfg(target_arch = "wasm32")]
+fn arm_assets_panel() {
+    use game_files::{HttpFiles, PickedFiles};
+    use wasm_bindgen::{JsCast, closure::Closure};
+    /// One panel event listener, kept for the page's lifetime.
+    type PanelClosure = Closure<dyn FnMut(web_sys::Event)>;
+    thread_local! {
+        /// The panel's closures, kept alive for the page's lifetime.
+        static KEEP: std::cell::RefCell<Vec<PanelClosure>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let search = window.location().search().unwrap_or_default();
+    if let Some(base) = search
+        .strip_prefix('?')
+        .and_then(|query| query.split('&').find_map(|pair| pair.strip_prefix("http=")))
+    {
+        wasm_bindgen_futures::spawn_local(run_assets_report(HttpFiles::new(base)));
+    }
+    let Some(input) = document
+        .get_element_by_id("game-folder")
+        .and_then(|element| element.dyn_into::<web_sys::HtmlInputElement>().ok())
+    else {
+        return;
+    };
+    let Some(button) = document.get_element_by_id("pick-folder") else {
+        return;
+    };
+    let open = {
+        let input = input.clone();
+        Closure::<dyn FnMut(web_sys::Event)>::new(move |_event: web_sys::Event| {
+            input.click();
+        })
+    };
+    button
+        .add_event_listener_with_callback("click", open.as_ref().unchecked_ref())
+        .ok();
+    let chosen = Closure::<dyn FnMut(web_sys::Event)>::new(move |_event: web_sys::Event| {
+        let Some(input) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id("game-folder"))
+            .and_then(|element| element.dyn_into::<web_sys::HtmlInputElement>().ok())
+        else {
+            return;
+        };
+        match PickedFiles::from_input(&input) {
+            Ok(files) => {
+                note(&format!("reading the dump: {} files picked…", files.len()));
+                wasm_bindgen_futures::spawn_local(run_assets_report(files));
+            }
+            Err(problem) => note(&problem),
+        }
+    });
+    input
+        .add_event_listener_with_callback("change", chosen.as_ref().unchecked_ref())
+        .ok();
+    KEEP.with(|keep| {
+        keep.borrow_mut().extend([open, chosen]);
+    });
+}
+
+/// One source's report, as the panel's lines.
+#[cfg(target_arch = "wasm32")]
+async fn run_assets_report<S: game_files::ByteSource>(source: S) {
+    use game_files::AssetsReport;
+    let AssetsReport {
+        found,
+        missing,
+        parsed,
+    } = game_files::inspect(&source).await;
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let panel = document.get_element_by_id("assets");
+    let found_line = document.get_element_by_id("assets-found");
+    let archives = document.get_element_by_id("assets-archives");
+    let row = |text: &str| -> Option<web_sys::Node> {
+        let element = document.create_element("div").ok()?;
+        element.set_text_content(Some(text));
+        Some(element.into())
+    };
+    if let Some(found_line) = found_line {
+        found_line.set_text_content(Some(&format!("{found}/20 archives")));
+    }
+    if let Some(archives) = archives {
+        while let Some(child) = archives.first_child() {
+            archives.remove_child(&child).ok();
+        }
+        if !missing.is_empty() {
+            if let Some(node) = row(&format!("missing: {}", missing.join(", "))) {
+                archives.append_child(&node).ok();
+            }
+        }
+        for archive in parsed {
+            let entries = if archive.entries > 0 {
+                format!("{} entries", archive.entries)
+            } else {
+                "no entries".to_owned()
+            };
+            let line = format!(
+                "{} — {entries}: {}",
+                archive.path,
+                archive.sample.join(" · ")
+            );
+            if let Some(node) = row(&line) {
+                archives.append_child(&node).ok();
+            }
+        }
+    }
+    if let Some(panel) = panel {
+        panel.set_attribute("style", "display: block").ok();
+    }
 }
 
 /// A `JsValue` error from a message.

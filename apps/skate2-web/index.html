@@ -89,6 +89,49 @@
       z-index: 5;
     }
     #controls b { color: var(--ink); font-weight: 600; }
+    #pick-folder {
+      position: absolute;
+      bottom: 12px;
+      right: 12px;
+      background: var(--panel);
+      border: 1px solid #2a2f38;
+      border-radius: 10px;
+      color: var(--ink);
+      font: inherit;
+      font-size: 13px;
+      padding: 8px 14px;
+      cursor: pointer;
+      z-index: 5;
+    }
+    #pick-folder:hover { border-color: var(--accent); }
+    #assets {
+      display: none;
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      background: var(--panel);
+      border: 1px solid #2a2f38;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      max-width: 46%;
+      max-height: 70%;
+      overflow-y: auto;
+      z-index: 5;
+    }
+    #assets .row {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 2px 0;
+    }
+    #assets .row .k { color: #8b939d; }
+    #assets-archives div {
+      color: #9aa3ad;
+      padding: 2px 0;
+      word-break: break-all;
+    }
   </style>
 </head>
 <body>
@@ -120,6 +163,17 @@
     <b>WASD</b> steer · <b>arrows</b> flick/tilt · <b>space</b> ollie ·
     <b>Q/E</b> triggers · <b>Z/C</b> shoulders · <b>shift</b> B ·
     <b>enter</b> start · <b>tab</b> back — or plug in a controller
+  </div>
+
+  <!-- The browser has no file system: the game's data comes from the
+       player's own dump through this picker, or ?http=<base> for a served
+       one (docs/WEB_PORT.md). -->
+  <input type="file" id="game-folder" webkitdirectory multiple style="display:none">
+  <button id="pick-folder">Load game folder…</button>
+
+  <div id="assets">
+    <div class="row"><span class="k">game data</span><span id="assets-found">—</span></div>
+    <div id="assets-archives"></div>
   </div>
 </body>
 </html>
