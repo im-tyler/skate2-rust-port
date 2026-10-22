@@ -1,0 +1,18 @@
+# Trunk serves the browser build from this directory:
+#
+#   cargo install trunk wasm-bindgen-cli --version 0.2.100
+#   cd apps/skate2-web && trunk serve
+#
+# Trunk picks up the getrandom build flag from .cargo/config.toml in this
+# directory, so run it from here.
+
+# Trunk 0.22: `target` is the HTML entry (the Rust target is
+# wasm32-unknown-unknown by default), and `addresses` replaces `address`.
+[build]
+target = "index.html"
+dist = "dist"
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8080
+open = false

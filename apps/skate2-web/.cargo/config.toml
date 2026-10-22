@@ -1,0 +1,11 @@
+# Build configuration for the browser target (see docs/WEB_PORT.md).
+#
+# getrandom 0.3 — pulled in by skate2-net's cryptography — refuses to build
+# for wasm32-unknown-unknown unless the `wasm_js` feature (enabled in this
+# crate's Cargo.toml) and this cfg are both set. Cargo only reads this file
+# when it runs from this directory, so the native builds are untouched:
+#
+#   cd apps/skate2-web && trunk serve
+
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", "getrandom_backend=\"wasm\""]

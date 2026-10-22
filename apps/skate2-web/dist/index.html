@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skate 2 — web test scene</title>
+  <!-- The cdylib (lib.rs `start`), not the desktop-only debug binary. -->
+  
+<script type="module">
+import init, * as bindings from '/skate2-web-cfaa9b7e0e5d9154.js';
+const wasm = await init({ module_or_path: '/skate2-web-932b6d94494f8dd4_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #e8e6e1;
+      --panel: rgba(16, 18, 22, 0.82);
+      --accent: #4ca8e0;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; overflow: hidden; background: #101216; }
+    body {
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      color: var(--ink);
+    }
+    #skate2-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      outline: none;
+    }
+    #loading {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      background: radial-gradient(ellipse at 50% 30%, #1c2129 0%, #101216 70%);
+      z-index: 10;
+    }
+    #loading h1 { font-size: 42px; font-weight: 800; letter-spacing: 1px; }
+    #loading h1 span { color: var(--accent); font-weight: 300; margin-left: 10px; }
+    #loading p { color: #9aa3ad; font-size: 14px; max-width: 480px; text-align: center; line-height: 1.5; }
+    #hud {
+      display: none;
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      background: var(--panel);
+      border: 1px solid #2a2f38;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      min-width: 230px;
+      z-index: 5;
+    }
+    #hud .row {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 2px 0;
+    }
+    #hud .row .k { color: #8b939d; }
+    #hud .track {
+      background: #23272e;
+      border-radius: 3px;
+      height: 6px;
+      margin: 3px 0 6px;
+      overflow: hidden;
+    }
+    #hud .track .fill {
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+    }
+    #hud .bar-label { color: #8b939d; margin-top: 6px; }
+    #controls {
+      position: absolute;
+      bottom: 12px;
+      left: 12px;
+      background: var(--panel);
+      border: 1px solid #2a2f38;
+      border-radius: 10px;
+      padding: 8px 14px;
+      font-size: 12px;
+      color: #9aa3ad;
+      line-height: 1.7;
+      z-index: 5;
+    }
+    #controls b { color: var(--ink); font-weight: 600; }
+  </style>
+<link rel="modulepreload" href="/skate2-web-cfaa9b7e0e5d9154.js" crossorigin="anonymous" integrity="sha384-SAU6suC7IGLIfO9r58eZS5k+YsdMcf6j8XvjJsMv1JlGrCrxBpmqbIGdQo1wU89J"><link rel="preload" href="/skate2-web-932b6d94494f8dd4_bg.wasm" crossorigin="anonymous" integrity="sha384-04axKZwvqWFflWnAKMglmO62/4GuiSnwW/G5szkv9FSndEXl5i7trFSkNmC6DEmm" as="fetch" type="application/wasm"></head>
+<body>
+  <canvas id="skate2-canvas" tabindex="0"></canvas>
+
+  <div id="loading">
+    <h1>Skate&nbsp;2<span>web test scene</span></h1>
+    <p id="loading-text">Loading the WebAssembly module…</p>
+  </div>
+
+  <div id="hud">
+    <div class="row"><span class="k">source</span><span id="hud-source">keyboard</span></div>
+    <div class="row"><span class="k">buttons</span><span id="hud-buttons">0x0000</span></div>
+    <div class="row"><span class="k">backend</span><span id="hud-backend">…</span></div>
+    <div class="row"><span class="k">fps</span><span id="hud-fps">—</span></div>
+    <div class="row"><span class="k">vibration</span><span id="hud-vib">0 / 0</span></div>
+    <div class="bar-label">left stick</div>
+    <div class="track"><div class="fill" id="bar-lx"></div></div>
+    <div class="track"><div class="fill" id="bar-ly"></div></div>
+    <div class="bar-label">right stick</div>
+    <div class="track"><div class="fill" id="bar-rx"></div></div>
+    <div class="track"><div class="fill" id="bar-ry"></div></div>
+    <div class="bar-label">triggers</div>
+    <div class="track"><div class="fill" id="bar-lt"></div></div>
+    <div class="track"><div class="fill" id="bar-rt"></div></div>
+  </div>
+
+  <div id="controls">
+    <b>WASD</b> steer · <b>arrows</b> flick/tilt · <b>space</b> ollie ·
+    <b>Q/E</b> triggers · <b>Z/C</b> shoulders · <b>shift</b> B ·
+    <b>enter</b> start · <b>tab</b> back — or plug in a controller
+  </div>
+<script>"use strict";
+
+(function () {
+
+    const address = '{{__TRUNK_ADDRESS__}}';
+    const base = '{{__TRUNK_WS_BASE__}}';
+    let protocol = '';
+    protocol =
+        protocol
+            ? protocol
+            : window.location.protocol === 'https:'
+                ? 'wss'
+                : 'ws';
+    const url = protocol + '://' + address + base + '.well-known/trunk/ws';
+
+    class Overlay {
+        constructor() {
+            // create an overlay
+            this._overlay = document.createElement("div");
+            const style = this._overlay.style;
+            style.height = "100vh";
+            style.width = "100vw";
+            style.position = "fixed";
+            style.top = "0";
+            style.left = "0";
+            style.backgroundColor = "rgba(222, 222, 222, 0.5)";
+            style.fontFamily = "sans-serif";
+            // not sure that's the right approach
+            style.zIndex = "1000000";
+            style.backdropFilter = "blur(1rem)";
+
+            const container = document.createElement("div");
+            // center it
+            container.style.position = "absolute";
+            container.style.top = "30%";
+            container.style.left = "15%";
+            container.style.maxWidth = "85%";
+
+            this._title = document.createElement("div");
+            this._title.innerText = "Build failure";
+            this._title.style.paddingBottom = "2rem";
+            this._title.style.fontSize = "2.5rem";
+
+            this._message = document.createElement("div");
+            this._message.style.whiteSpace = "pre-wrap";
+
+            const icon= document.createElement("div");
+            icon.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" fill="#dc3545" viewBox="0 0 16 16"><path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/></svg>';
+            this._title.prepend(icon);
+
+            container.append(this._title, this._message);
+            this._overlay.append(container);
+
+            this._inject();
+            window.setInterval(() => {
+                this._inject();
+            }, 250);
+        }
+
+        set reason(reason) {
+            this._message.textContent = reason;
+        }
+
+        _inject() {
+            if (!this._overlay.isConnected) {
+                // prepend it
+                document.body?.prepend(this._overlay);
+            }
+        }
+
+    }
+
+    class Client {
+        constructor(url) {
+            this.url = url;
+            this.poll_interval = 5000;
+            this._overlay = null;
+        }
+
+        start() {
+            const ws = new WebSocket(this.url);
+            ws.onmessage = (ev) => {
+                const msg = JSON.parse(ev.data);
+                switch (msg.type) {
+                    case "reload":
+                        this.reload();
+                        break;
+                    case "buildFailure":
+                        this.buildFailure(msg.data)
+                        break;
+                }
+            };
+            ws.onclose = () => this.onclose();
+        }
+
+        onclose() {
+            window.setTimeout(
+                () => {
+                    // when we successfully reconnect, we'll force a
+                    // reload (since we presumably lost connection to
+                    // trunk due to it being killed, so it will have
+                    // rebuilt on restart)
+                    const ws = new WebSocket(this.url);
+                    ws.onopen = () => window.location.reload();
+                    ws.onclose = () => this.onclose();
+                },
+                this.poll_interval);
+        }
+
+        reload() {
+            window.location.reload();
+        }
+
+        buildFailure({reason}) {
+            // also log the console
+            console.error("Build failed:", reason);
+
+            console.debug("Overlay", this._overlay);
+
+            if (!this._overlay) {
+                this._overlay = new Overlay();
+            }
+            this._overlay.reason = reason;
+        }
+    }
+
+    new Client(url).start();
+
+})()
+</script></body>
+</html>

@@ -1,0 +1,44 @@
+[package]
+name = "skate2-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+skate2-core = { path = "../../crates/skate2-core" }
+wgpu = "=30.0.1"
+winit = "=0.29.15"
+
+# The browser build also runs on the desktop as the same test scene, where the
+# GPU request can simply block.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = "=0.3.0"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "=0.4.79"
+js-sys = "=0.3.106"
+web-sys = { version = "=0.3.106", features = [
+    "Document",
+    "Element",
+    "Gamepad",
+    "GamepadButton",
+    "GamepadMappingType",
+    "HtmlCanvasElement",
+    "Navigator",
+    "Node",
+    "Performance",
+    "Window",
+] }
+console_error_panic_hook = "=0.1.7"
+# skate2-net's cryptography needs randomness; on wasm32-unknown-unknown getrandom
+# only compiles with this feature plus the `--cfg getrandom_backend="wasm"` flag
+# (see .cargo/config.toml and docs/WEB_PORT.md).
+getrandom = { version = "=0.3.4", features = ["wasm_js"] }
+
+[lints]
+workspace = true
