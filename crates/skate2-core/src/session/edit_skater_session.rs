@@ -197,10 +197,9 @@ mod board_part_tests {
                 mounts.push(MountedBig::open(path, spec.use_external_header).unwrap());
             }
         }
-        let vault = Arc::new(
+        let vault =
             AttributeRuntimeVault::try_load_mounted(&mounts, "data/db/skater.vlt", &crate::selected_original_asset_classes::selected_classes())
-                .unwrap(),
-        );
+                .unwrap();
         let cvars = InputCvarReferences::new_static_initialized();
         crate::input_cvar_runtime::InputCvarManager::new().try_link(&cvars).unwrap();
         let db = CacPartDb::parse(&mounts.read_path(skate2_formats::cac_parts::DATABASE_PATH).unwrap()).unwrap();

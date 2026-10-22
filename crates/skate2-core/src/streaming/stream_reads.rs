@@ -11,15 +11,16 @@ pub(crate) fn queue(read: impl FnOnce() + Send + 'static) {
     static READER: OnceLock<Option<mpsc::Sender<Read>>> = OnceLock::new();
     let reader = READER.get_or_init(|| {
         let (sender, receiver) = mpsc::channel::<Read>();
-        std::thread::Builder::new()
-            .name("sk8 stream read".to_owned())
-            .spawn(move || {
+        crate::host_thread::spawn_worker(
+            std::thread::Builder::new().name("sk8 stream read".to_owned()),
+            move || {
                 for read in receiver {
                     read();
                 }
-            })
-            .ok()
-            .map(|_| sender)
+            },
+        )
+        .ok()
+        .map(|_| sender)
     });
     let read: Read = Box::new(read);
     let refused = match reader {

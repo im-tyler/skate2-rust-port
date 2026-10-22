@@ -24,7 +24,7 @@ use skate2_formats::{
 };
 use std::{
     collections::{HashMap, VecDeque},
-    fmt, io,
+    fmt,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Condvar, Mutex, MutexGuard},
     thread::{self, JoinHandle},
@@ -225,7 +225,6 @@ impl std::error::Error for MountedReadSchedulerError {}
 pub enum MountedStreamBackendError<SinkError> {
     Request(MountedReadRequestError),
     Scheduler(MountedReadSchedulerError),
-    WorkerSpawn(io::Error),
     Registration(SinkError),
 }
 
@@ -234,9 +233,6 @@ impl<SinkError: fmt::Display> fmt::Display for MountedStreamBackendError<SinkErr
         match self {
             Self::Request(error) => error.fmt(formatter),
             Self::Scheduler(error) => error.fmt(formatter),
-            Self::WorkerSpawn(error) => {
-                write!(formatter, "cannot spawn async read worker: {error}")
-            }
             Self::Registration(error) => write!(formatter, "stream registration failed: {error}"),
         }
     }
@@ -457,10 +453,16 @@ impl Drop for MountedReadHandle {
 struct ReadScheduler {
     core: Arc<SchedulerCore>,
     workers: Vec<JoinHandle<()>>,
+    /// Inline mode (host policy: no worker threads): admitted reads run on
+    /// the polling thread during `poll`, through the same state machine.
+    inline: bool,
 }
 
 impl ReadScheduler {
-    fn new(source: Arc<dyn ReadSource>) -> io::Result<Self> {
+    fn new(source: Arc<dyn ReadSource>) -> Self {
+        if !crate::host_thread::worker_threads_available() {
+            return Self::inline(source);
+        }
         let core = Arc::new(SchedulerCore {
             source,
             state: Mutex::new(SchedulerState::new()),
@@ -469,15 +471,21 @@ impl ReadScheduler {
         let mut workers = Vec::with_capacity(MAX_ACTIVE_ASYNC_READS);
         for index in 0..MAX_ACTIVE_ASYNC_READS {
             let worker_core = Arc::clone(&core);
-            match thread::Builder::new()
-                .name(format!("skate2-stream-read-{index}"))
-                .spawn(move || {
+            match crate::host_thread::spawn_worker(
+                thread::Builder::new().name(format!("skate2-stream-read-{index}")),
+                move || {
                     if catch_unwind(AssertUnwindSafe(|| worker_main(&worker_core))).is_err() {
                         worker_core.mark_fault(MountedReadSchedulerError::WorkerPanicked);
                     }
-                }) {
+                },
+            ) {
                 Ok(worker) => workers.push(worker),
                 Err(error) => {
+                    // A worker could not start. The pool is all-or-nothing:
+                    // shut the started ones down and join them, then serve
+                    // every read inline — the same degradation the host
+                    // policy produces, so a thread-starved native process
+                    // keeps loading rather than failing.
                     {
                         let mut state = match core.state.lock() {
                             Ok(state) => state,
@@ -489,11 +497,63 @@ impl ReadScheduler {
                     for worker in workers {
                         let _ = worker.join();
                     }
-                    return Err(error);
+                    let _ = error;
+                    // A fresh core: the abandoned one's operations died with
+                    // its workers, and no request has been served yet.
+                    return Self::inline(Arc::clone(&core.source));
                 }
             }
         }
-        Ok(Self { core, workers })
+        Self {
+            core,
+            workers,
+            inline: false,
+        }
+    }
+
+    /// A scheduler with no workers: reads run during `poll`. The pool, the
+    /// admission limit, and the FIFO order are the workers' own.
+    fn inline(source: Arc<dyn ReadSource>) -> Self {
+        Self {
+            core: Arc::new(SchedulerCore {
+                source,
+                state: Mutex::new(SchedulerState::new()),
+                wake: Condvar::new(),
+            }),
+            workers: Vec::new(),
+            inline: true,
+        }
+    }
+
+    /// Runs every admitted read on the calling thread until none is ready or
+    /// a fault is set: the worker's loop without the waiting.
+    fn run_ready_inline(&self) {
+        loop {
+            let (id, request) = {
+                let mut state = match self.core.state.lock() {
+                    Ok(state) => state,
+                    Err(poisoned) => {
+                        let mut state = poisoned.into_inner();
+                        state.fault = Some(MountedReadSchedulerError::Poisoned);
+                        self.core.wake.notify_all();
+                        return;
+                    }
+                };
+                if state.shutting_down || state.fault.is_some() {
+                    return;
+                }
+                let Some(id) = state.ready.pop_front() else {
+                    return;
+                };
+                let Some(operation) = state.operations.get_mut(&id) else {
+                    continue;
+                };
+                operation.phase = OperationPhase::Reading;
+                (id, operation.request.clone())
+            };
+            let outcome = catch_unwind(AssertUnwindSafe(|| self.core.source.read(&request)));
+            record_outcome(&self.core, id, outcome);
+        }
     }
 
     fn begin(
@@ -528,6 +588,11 @@ impl ReadScheduler {
         &self,
         handle: &mut MountedReadHandle,
     ) -> Result<AsyncReadPoll, MountedReadSchedulerError> {
+        // Inline mode runs the admitted reads here: this poll call is the
+        // "worker". Worker mode's workers have usually finished already.
+        if self.inline {
+            self.run_ready_inline();
+        }
         if !Arc::ptr_eq(&self.core, &handle.core) {
             return Err(MountedReadSchedulerError::ForeignHandle);
         }
@@ -605,50 +670,58 @@ fn worker_main(core: &SchedulerCore) {
         };
 
         let outcome = catch_unwind(AssertUnwindSafe(|| core.source.read(&request)));
-        let mut state = match core.state.lock() {
-            Ok(state) => state,
-            Err(poisoned) => {
-                let mut state = poisoned.into_inner();
-                state.fault = Some(MountedReadSchedulerError::Poisoned);
-                core.wake.notify_all();
-                return;
-            }
-        };
-        let (handle_alive, worker_panicked) = {
-            let Some(operation) = state.operations.get_mut(&id) else {
-                state.fault = Some(MountedReadSchedulerError::MissingOperation);
-                core.wake.notify_all();
-                return;
-            };
-            let worker_panicked = match outcome {
-                Ok(SourceRead::Complete(bytes)) => {
-                    operation.phase = OperationPhase::Complete;
-                    operation.bytes = Some(bytes);
-                    false
-                }
-                Ok(SourceRead::Failed) => {
-                    operation.phase = OperationPhase::Failed;
-                    false
-                }
-                Err(_) => {
-                    operation.phase = OperationPhase::Failed;
-                    true
-                }
-            };
-            (operation.handle_alive, worker_panicked)
-        };
-        if worker_panicked {
-            state.fault = Some(MountedReadSchedulerError::WorkerPanicked);
-        }
-        if !handle_alive {
-            state.operations.remove(&id);
-            let lease_released = state.release_active_lease();
-            if lease_released && state.fault.is_none() && !state.shutting_down {
-                state.admit_pending();
-            }
-        }
-        core.wake.notify_all();
+        record_outcome(core, id, outcome);
     }
+}
+
+/// Completes one admitted read and records its outcome through the shared
+/// state, exactly as the worker does after its `source.read` returns — and
+/// as inline mode does during `poll`. A missing operation or a poisoned
+/// lock latches the same fault either way.
+fn record_outcome(core: &SchedulerCore, id: u64, outcome: thread::Result<SourceRead>) {
+    let mut state = match core.state.lock() {
+        Ok(state) => state,
+        Err(poisoned) => {
+            let mut state = poisoned.into_inner();
+            state.fault = Some(MountedReadSchedulerError::Poisoned);
+            core.wake.notify_all();
+            return;
+        }
+    };
+    let (handle_alive, worker_panicked) = {
+        let Some(operation) = state.operations.get_mut(&id) else {
+            state.fault = Some(MountedReadSchedulerError::MissingOperation);
+            core.wake.notify_all();
+            return;
+        };
+        let worker_panicked = match outcome {
+            Ok(SourceRead::Complete(bytes)) => {
+                operation.phase = OperationPhase::Complete;
+                operation.bytes = Some(bytes);
+                false
+            }
+            Ok(SourceRead::Failed) => {
+                operation.phase = OperationPhase::Failed;
+                false
+            }
+            Err(_) => {
+                operation.phase = OperationPhase::Failed;
+                true
+            }
+        };
+        (operation.handle_alive, worker_panicked)
+    };
+    if worker_panicked {
+        state.fault = Some(MountedReadSchedulerError::WorkerPanicked);
+    }
+    if !handle_alive {
+        state.operations.remove(&id);
+        let lease_released = state.release_active_lease();
+        if lease_released && state.fault.is_none() && !state.shutting_down {
+            state.admit_pending();
+        }
+    }
+    core.wake.notify_all();
 }
 
 /// Concrete mount-backed implementation of [`InnerStreamBackend`].
@@ -683,8 +756,9 @@ where
         source: Arc<dyn ReadSource>,
         sink: Sink,
     ) -> Result<Self, MountedStreamBackendError<Sink::Error>> {
-        let scheduler =
-            ReadScheduler::new(source).map_err(MountedStreamBackendError::WorkerSpawn)?;
+        // A worker that cannot start degrades to inline reads, so the
+        // scheduler always constructs: host policy, not an error.
+        let scheduler = ReadScheduler::new(source);
         Ok(Self { scheduler, sink })
     }
 
@@ -2005,5 +2079,142 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// Inline mode's `poll` is the worker: every admitted read runs there,
+    /// FIFO, and handles read the same bytes whichever order they poll in.
+    #[test]
+    fn inline_mode_completes_reads_at_poll_in_fifo_order() {
+        let source = Arc::new(TestSource::default());
+        let mut backend = inline_backend(Arc::clone(&source));
+        let mut first = backend.begin_read(request(0)).unwrap();
+        let mut second = backend.begin_read(request(1)).unwrap();
+        let mut third = backend.begin_read(request(2)).unwrap();
+        // Poll in reverse: the last poll still ran every ready read.
+        assert_eq!(
+            backend.poll_read(&mut third).unwrap(),
+            AsyncReadPoll::Complete(request(2).path.clone().into_bytes())
+        );
+        assert_eq!(
+            backend.poll_read(&mut second).unwrap(),
+            AsyncReadPoll::Complete(request(1).path.clone().into_bytes())
+        );
+        assert_eq!(
+            backend.poll_read(&mut first).unwrap(),
+            AsyncReadPoll::Complete(request(0).path.clone().into_bytes())
+        );
+        assert_eq!(
+            source.started_paths(),
+            vec![
+                "data\\stream\\request-0.xss",
+                "data\\stream\\request-1.xss",
+                "data\\stream\\request-2.xss"
+            ]
+        );
+    }
+
+    /// Admission is the workers' own: three active leases, the fourth waits
+    /// for a handle drop, then completes — with no thread involved.
+    #[test]
+    fn inline_mode_keeps_the_three_active_admission_cap() {
+        let source = Arc::new(TestSource::default());
+        let mut backend = inline_backend(Arc::clone(&source));
+        let mut first = backend.begin_read(request(0)).unwrap();
+        let mut second = backend.begin_read(request(1)).unwrap();
+        let mut third = backend.begin_read(request(2)).unwrap();
+        let mut fourth = backend.begin_read(request(3)).unwrap();
+        for handle in [&mut first, &mut second, &mut third] {
+            assert!(matches!(
+                backend.poll_read(handle).unwrap(),
+                AsyncReadPoll::Complete(_)
+            ));
+        }
+        // Three completed reads hold their leases until their handles drop.
+        assert_eq!(
+            backend.poll_read(&mut fourth).unwrap(),
+            AsyncReadPoll::Pending
+        );
+        assert_eq!(source.started_paths().len(), 3);
+        drop(first);
+        assert!(matches!(
+            backend.poll_read(&mut fourth).unwrap(),
+            AsyncReadPoll::Complete(_)
+        ));
+        assert_eq!(source.started_paths().len(), 4);
+    }
+
+    /// The 128-operation pool is the workers' own too.
+    #[test]
+    fn inline_mode_exhausts_the_operation_pool_at_capacity() {
+        let source = Arc::new(TestSource::default());
+        let mut backend = inline_backend(Arc::clone(&source));
+        let mut handles = Vec::new();
+        for index in 0..ASYNC_OPERATION_CAPACITY {
+            handles.push(backend.begin_read(request(index % 8)).unwrap());
+        }
+        let overflow = backend.begin_read(request(9));
+        assert!(
+            matches!(
+                overflow,
+                Err(MountedStreamBackendError::Scheduler(
+                    MountedReadSchedulerError::OperationPoolExhausted
+                ))
+            ),
+            "the 129th begin exhausts the pool"
+        );
+    }
+
+    /// A dropped pending handle is discarded without ever reading.
+    #[test]
+    fn inline_mode_drops_pending_without_reading() {
+        let source = Arc::new(TestSource::default());
+        let mut backend = inline_backend(Arc::clone(&source));
+        let _first = backend.begin_read(request(0)).unwrap();
+        let _second = backend.begin_read(request(1)).unwrap();
+        let _third = backend.begin_read(request(2)).unwrap();
+        let pending = backend.begin_read(request(3)).unwrap();
+        drop(pending);
+        // Nothing polls; nothing was read at all in inline mode.
+        assert!(source.started_paths().is_empty());
+    }
+
+    /// A source failure reads as the workers' own `Failed`.
+    #[test]
+    fn inline_mode_reports_source_failures() {
+        let source = Arc::new(TestSource::default());
+        source.set_outcome(&request(0).path, TestOutcome::Failed);
+        let mut backend = inline_backend(Arc::clone(&source));
+        let mut handle = backend.begin_read(request(0)).unwrap();
+        assert_eq!(
+            backend.poll_read(&mut handle).unwrap(),
+            AsyncReadPoll::Failed
+        );
+    }
+
+    /// A source panic latches the scheduler fault, as the worker's
+    /// catch_unwind does.
+    #[test]
+    fn inline_mode_latches_a_panic_fault() {
+        let source = Arc::new(TestSource::default());
+        source.set_outcome(&request(0).path, TestOutcome::Panic);
+        let mut backend = inline_backend(Arc::clone(&source));
+        let mut handle = backend.begin_read(request(0)).unwrap();
+        let _ = backend.poll_read(&mut handle);
+        // The fault also refuses new work, as it does in worker mode.
+        let next = backend.begin_read(request(1));
+        assert!(matches!(
+            next,
+            Err(MountedStreamBackendError::Scheduler(
+                MountedReadSchedulerError::WorkerPanicked
+            ))
+        ));
+    }
+
+    /// The inline scheduler through the same backend harness as the workers.
+    fn inline_backend(source: Arc<TestSource>) -> MountedStreamBackend<RecordingSink> {
+        MountedStreamBackend {
+            scheduler: ReadScheduler::inline(source),
+            sink: RecordingSink::default(),
+        }
     }
 }
