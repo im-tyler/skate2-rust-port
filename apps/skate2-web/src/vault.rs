@@ -5,10 +5,10 @@
 //! walks (`crates/skate2-core/src/challenge/attrib_db.rs`), mirrored so the
 //! browser shows what the game itself would read.
 
-use crate::game_files::{ByteSource, RemoteArchive};
+use crate::game_files::{ByteSource, RemoteMountSet};
 use skate2_formats::attrib::{
-    AttributeDataFile, AttributeExportKind, AttributePointerLocation, AttributePointerValue,
-    AttributeVaultMetadata, string_hash64,
+    AttributeExportKind, AttributePointerLocation, AttributePointerValue, AttributeVaultMetadata,
+    string_hash64,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -41,13 +41,14 @@ pub(crate) struct VaultSummary {
 /// see the panel's line for the message.
 pub(crate) async fn inspect_vault<S: ByteSource + ?Sized>(
     source: &S,
-    archive: &RemoteArchive,
+    mounts: &RemoteMountSet,
     vlt_name: &str,
 ) -> Result<VaultSummary, String> {
-    let vlt = archive
-        .read_entry_by_name(source, vlt_name)
+    let vlt = mounts
+        .read_path(source, vlt_name)
         .await
-        .map_err(|problem| format!("{vlt_name}: {problem}"))?;
+        .map_err(|problem| format!("{vlt_name}: {problem}"))?
+        .0;
     let metadata =
         AttributeVaultMetadata::parse(&vlt).map_err(|error| format!("{vlt_name}: {error}"))?;
     // The vault names its data files (the `.bin` sibling); read each from the
@@ -59,10 +60,11 @@ pub(crate) async fn inspect_vault<S: ByteSource + ?Sized>(
     let mut dependencies = Vec::new();
     for dependency in &metadata.dependencies {
         let path = format!("{directory}\\{}", dependency.name);
-        let bytes = archive
-            .read_entry_by_name(source, &path)
+        let bytes = mounts
+            .read_path(source, &path)
             .await
-            .map_err(|problem| format!("{path}: {problem}"))?;
+            .map_err(|problem| format!("{path}: {problem}"))?
+            .0;
         dependencies.push(dependency.name.clone());
         buffers.push(bytes);
     }
@@ -173,27 +175,6 @@ fn read_type_names(
         at += len + 1;
     }
     Ok(names)
-}
-
-/// The class names the `.bin`'s string table carries, hashed against the
-/// class export ids — kept for the future runtime, which resolves names the
-/// game hashed; the panel shows the pinned ones instead.
-#[expect(
-    dead_code,
-    reason = "the runtime name table arrives with milestone four"
-)]
-fn class_names_from_bin(bin: &[u8], class_ids: &BTreeSet<u64>) -> Vec<String> {
-    let Ok(data_file) = AttributeDataFile::parse(bin) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = data_file
-        .strings
-        .iter()
-        .filter(|string| class_ids.contains(&string_hash64(&string.value)))
-        .map(|string| string.value.clone())
-        .collect();
-    names.sort();
-    names
 }
 
 /// `physics`'s `default` collection's first four layout words. A collection

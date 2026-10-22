@@ -281,9 +281,14 @@ pub(crate) struct AssetsReport {
     pub(crate) missing: Vec<String>,
     /// The archives whose tables were parsed.
     pub(crate) parsed: Vec<ParsedArchive>,
-    /// Step two's proof: one whole entry read out of `db.big` through ranged
-    /// requests, RefPack-expanded if it was stored compressed.
+    /// Step four's proof: the mount set's own summary line.
+    pub(crate) mount_line: String,
+    /// Step two's proof: the Vault's `.vlt`, read through the mount set's
+    /// routing.
     pub(crate) entry_read: String,
+    /// Step four's proof: one entry from a different archive, routed across
+    /// the mounted set.
+    pub(crate) cross_read: String,
     /// Step three's proof: the Vault pair's database summary.
     pub(crate) vault_line: String,
 }
@@ -346,59 +351,85 @@ pub(crate) async fn inspect<S: ByteSource + ?Sized>(source: &S) -> AssetsReport 
             Err(sample) => report(0, sample),
         });
     }
-    // Step two: one whole entry out of the Vault database, over ranges only.
-    // Step three: that entry's Vault parsed — types, classes, definitions.
-    let (entry_read, vault_line) = db_proof(source).await;
+    // Steps two through four: the mount set routes every read. The Vault
+    // pair comes through the same routing as any other path.
+    let mounts = RemoteMountSet::open_all(source).await;
+    let (named, viv4) = mounts.table_formats();
+    let failed = mounts
+        .failures
+        .iter()
+        .map(|(path, _)| *path)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mount_line = format!(
+        "{} of 20 tables, {} entries ({} named, {} `Viv4`){}",
+        mounts.len(),
+        mounts.total_entries(),
+        named,
+        viv4,
+        if failed.is_empty() {
+            String::new()
+        } else {
+            format!("; open failed: {failed}")
+        }
+    );
+    let (entry_read, cross_read, vault_line) = mount_proof(source, &mounts).await;
     AssetsReport {
         found,
         missing,
         parsed,
+        mount_line,
         entry_read,
+        cross_read,
         vault_line,
     }
 }
 
-/// Steps two and three's proofs from one opened `db.big`: its first named
-/// entry read whole over ranges, and the Vault pair's parsed summary.
-async fn db_proof<S: ByteSource + ?Sized>(source: &S) -> (String, String) {
-    let Ok(db) = RemoteArchive::open(source, "data/db/db.big").await else {
-        return (
-            "db.big remote open failed".to_owned(),
-            "db.big remote open failed".to_owned(),
-        );
+/// The mount set's proofs: the Vault's `.vlt` read through routing, one
+/// small entry from a *different* archive (routing across archives), and
+/// the Vault pair's parsed summary.
+async fn mount_proof<S: ByteSource + ?Sized>(
+    source: &S,
+    mounts: &RemoteMountSet,
+) -> (String, String, String) {
+    const SKATER_VLT: &str = "data\\db\\skater.vlt";
+    let entry_read = match mounts.read_path(source, SKATER_VLT).await {
+        Ok((bytes, via)) => format!("{SKATER_VLT}: {} bytes via {via}", bytes.len()),
+        Err(problem) => problem,
     };
-    let named = db
-        .archive
-        .entries
-        .iter()
-        .find(|entry| matches!(&entry.key, skate2_formats::big::BigEntryKey::Name(_)));
-    let entry_read = match named {
-        Some(entry) => {
+    // One small entry from an archive that is not db.big: the first stored
+    // entry at most 64 KiB, from the first mounted archive that has one.
+    let cross_read = 'cross: {
+        for (archive_path, archive) in &mounts.mounted {
+            if *archive_path == "data/db/db.big" {
+                continue;
+            }
+            let Some(entry) = archive
+                .archive
+                .entries
+                .iter()
+                .find(|entry| entry.stored_size <= 64 * 1024)
+            else {
+                continue;
+            };
             let name = match &entry.key {
                 skate2_formats::big::BigEntryKey::Name(name) => name.clone(),
                 skate2_formats::big::BigEntryKey::Hash(hash) => format!("{hash:#010x}"),
             };
-            match db.read_entry_by_name(source, &name).await {
-                Ok(bytes) => format!(
-                    "{name}: {} stored → {} bytes{}",
-                    entry.stored_size,
-                    bytes.len(),
-                    if entry.stored_size < entry.unpacked_size {
-                        ", RefPack"
-                    } else {
-                        ""
-                    }
-                ),
-                Err(problem) => format!("{name}: {problem}"),
+            match read_remote_entry(source, &archive.data_path, entry).await {
+                Ok(bytes) => {
+                    break 'cross format!("{name}: {} bytes via {archive_path}", bytes.len());
+                }
+                Err(problem) => break 'cross format!("{name}: {problem}"),
             }
         }
-        None => "db.big holds no named entry to read".to_owned(),
+        break 'cross "no small entry outside db.big to read".to_owned();
     };
-    let vault_line = match crate::vault::inspect_vault(source, &db, "data\\db\\skater.vlt").await {
+    let vault_line = match crate::vault::inspect_vault(source, mounts, SKATER_VLT).await {
         Ok(summary) => vault_line(&summary),
         Err(problem) => format!("skater.vlt: {problem}"),
     };
-    (entry_read, vault_line)
+    (entry_read, cross_read, vault_line)
 }
 
 /// The panel's Vault line from a parsed summary.
@@ -445,6 +476,85 @@ fn header_u32(bytes: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_be_bytes([field[0], field[1], field[2], field[3]]))
 }
 
+/// The game's archives, mounted as ranged tables: the browser twin of
+/// `skate2_formats`' `MountSet`, in the native `ArchiveSpec` order (boot
+/// first, then load, game and characters). Tables are opened eagerly — they
+/// are the small `.bh`/header spans — while entry payloads stay ranged and
+/// on demand, which is what keeps multi-gigabyte archives out of memory.
+pub(crate) struct RemoteMountSet {
+    /// The archives that mounted, in mount order.
+    mounted: Vec<(&'static str, RemoteArchive)>,
+    /// The mount paths whose tables could not be opened, with the reason.
+    pub(crate) failures: Vec<(&'static str, String)>,
+}
+
+impl RemoteMountSet {
+    /// Mounts every expected archive's table; an archive that cannot open
+    /// is recorded in [`Self::failures`] and skipped, as a dump missing one
+    /// file should still read the other nineteen.
+    pub(crate) async fn open_all<S: ByteSource + ?Sized>(source: &S) -> Self {
+        let mut mounted = Vec::new();
+        let mut failures = Vec::new();
+        for path in MOUNT_PATHS {
+            match RemoteArchive::open(source, path).await {
+                Ok(archive) => mounted.push((path, archive)),
+                Err(problem) => failures.push((path, problem)),
+            }
+        }
+        Self { mounted, failures }
+    }
+
+    /// How many archives mounted.
+    pub(crate) fn len(&self) -> usize {
+        self.mounted.len()
+    }
+
+    /// The mounted archives' entry counts by table format: named tables
+    /// first, `Viv4` hashed tables second.
+    pub(crate) fn table_formats(&self) -> (usize, usize) {
+        let named = self
+            .mounted
+            .iter()
+            .filter(|(_, archive)| {
+                matches!(
+                    archive.archive.format,
+                    skate2_formats::big::BigFormat::Named { .. }
+                )
+            })
+            .count();
+        (named, self.mounted.len() - named)
+    }
+
+    /// The total number of entries across all mounted tables.
+    pub(crate) fn total_entries(&self) -> usize {
+        self.mounted
+            .iter()
+            .map(|(_, archive)| archive.archive.entries.len())
+            .sum()
+    }
+
+    /// One entry's bytes by its virtual path, routed across the mounted
+    /// archives in mount order — the first table that holds the path serves
+    /// it, as the native `MountSet::read_path` searches. Returns the bytes
+    /// and the archive that served them.
+    pub(crate) async fn read_path<S: ByteSource + ?Sized>(
+        &self,
+        source: &S,
+        path: &str,
+    ) -> Result<(Vec<u8>, &'static str), String> {
+        for (archive_path, archive) in &self.mounted {
+            let entry = archive
+                .archive
+                .find_path(path)
+                .or_else(|| archive.archive.find_path(&path.replace('\\', "/")));
+            if let Some(entry) = entry {
+                let bytes = read_remote_entry(source, &archive.data_path, entry).await?;
+                return Ok((bytes, archive_path));
+            }
+        }
+        Err(format!("{path}: no mounted archive holds it"))
+    }
+}
 /// One opened remote archive: its parsed table and the data file the entry
 /// offsets refer to (the `.big`, also when a `.bh` sibling held the table).
 pub(crate) struct RemoteArchive {
@@ -483,20 +593,6 @@ impl RemoteArchive {
             archive,
             data_path: path.to_owned(),
         })
-    }
-
-    /// One entry's bytes by its stored name, read over ranges.
-    pub(crate) async fn read_entry_by_name<S: ByteSource + ?Sized>(
-        &self,
-        source: &S,
-        name: &str,
-    ) -> Result<Vec<u8>, String> {
-        let entry = self
-            .archive
-            .find_path(name)
-            .or_else(|| self.archive.find_path(&name.replace('\\', "/")))
-            .ok_or_else(|| "no such entry".to_owned())?;
-        read_remote_entry(source, &self.data_path, entry).await
     }
 }
 

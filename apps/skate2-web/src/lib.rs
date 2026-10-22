@@ -330,7 +330,9 @@ async fn run_assets_report<S: game_files::ByteSource>(source: S) {
         found,
         missing,
         parsed,
+        mount_line,
         entry_read,
+        cross_read,
         vault_line,
     } = game_files::inspect(&source).await;
     let Some(document) = web_sys::window().and_then(|window| window.document()) else {
@@ -371,8 +373,16 @@ async fn run_assets_report<S: game_files::ByteSource>(source: S) {
                 archives.append_child(&node).ok();
             }
         }
-        // Step two's proof line: the ranged entry read.
-        if let Some(node) = row(&format!("ranged read: {entry_read}")) {
+        // Step four's proof line: the mount set itself.
+        if let Some(node) = row(&format!("mounted: {mount_line}")) {
+            archives.append_child(&node).ok();
+        }
+        // Step two's proof line: the ranged entry read, through the routing.
+        if let Some(node) = row(&format!("mount read: {entry_read}")) {
+            archives.append_child(&node).ok();
+        }
+        // Step four's proof line: routing across archives.
+        if let Some(node) = row(&format!("cross read: {cross_read}")) {
             archives.append_child(&node).ok();
         }
         // Step three's proof line: the Vault database itself.

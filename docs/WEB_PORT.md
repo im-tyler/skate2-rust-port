@@ -19,6 +19,7 @@ blocks a proper port.
 | Game bytes in the browser (asset step one) | done — picker and `?http=` sources; all 20 mounted archives found, `globallocators.big` and `db.big` tables parsed in WASM against a real dump |
 | Ranged streaming (asset step two) | done — entries read out of archives over HTTP `Range` (or `Blob::slice` for the picker), `RefPack` expanded, hashed sizes validated: `db.big`'s `skater.vlt` (851,632 bytes) read whole through ranged requests |
 | Vault attributes (asset step three) | done — the `.vlt`/`.bin` pair parsed in WASM: 675 types, 304 classes, 4,709 definitions, and `physics.default`'s layout read live — gravity `-9.8` (`0xc11ccccd`), the corpus test's pinned word |
+| The mount set (asset step four) | done — all twenty archive tables mounted in `RemoteMountSet` (18,274 entries), virtual-path reads routed across archives in mount order: `skater.vlt` via `db.big`, a shader XML via `render.big` |
 | Real renderer / session / original assets in the browser | not started — see the blockers below |
 
 ## The port's road
@@ -31,8 +32,8 @@ counts:
 | 1 | Bytes and BIG table parsing in the browser | done |
 | 2 | Ranged streaming: entries out of archives, `RefPack`, hashed-size checks | done |
 | 3 | Vault attributes: parse the `.vlt` payloads the entries carry | done |
-| 4 | The async mount set: all twenty archives mounted in WASM | next |
-| 5 | Threads → cooperative futures for core's streaming | |
+| 4 | The async mount set: all twenty archives mounted in WASM | done |
+| 5 | Threads → cooperative futures for core's streaming | next |
 | 6 | Audio (Web Audio + XMA) and networking (WebSockets) | |
 | 7 | The real renderer and booting a session in the tab | |
 
@@ -202,4 +203,6 @@ build was 851,568, a dump difference, but) and reads `physics`'s `default`
 collection layout live — gravity `-9.8`, bits `0xc11ccccd`, exactly the
 word the corpus test pins. Class names are verified by executable-pinned
 hashes (`physics`, `fe`, `characters_marquee`); the `.bin` string table
-does not carry them.
+does not carry them. Step four mounts the same set: twenty tables, 18,274
+entries, every read routed by virtual path — `skater.vlt` served from
+`db.big`, `data\render\shaders\debug\advertisement.xml` from `render.big`.
