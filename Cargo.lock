@@ -2285,6 +2285,7 @@ dependencies = [
  "js-sys",
  "pollster 0.3.0",
  "skate2-core",
+ "skate2-formats",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

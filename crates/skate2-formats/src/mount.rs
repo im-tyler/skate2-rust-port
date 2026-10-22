@@ -10,7 +10,7 @@ use std::{
     io::{self, Read, Seek, SeekFrom},
     ops::Range,
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -134,11 +134,33 @@ impl ArchiveSpec {
     /// ([`crate::host_path::on_disk`]).
     #[must_use]
     pub fn path_under(&self, root: &Path) -> PathBuf {
-        crate::host_path::on_disk(&root.join(
-            self.relative_path
-                .replace('\\', std::path::MAIN_SEPARATOR_STR),
-        ))
+        crate::host_path::on_disk(
+            &root.join(
+                self.relative_path
+                    .replace('\\', std::path::MAIN_SEPARATOR_STR),
+            ),
+        )
     }
+}
+
+/// Random-access bytes of one archive's data file, for hosts that do not
+/// read archives from a file system (the browser build's in-memory spans).
+pub trait ArchiveRanges: Send + Sync + fmt::Debug {
+    /// Fills `buffer` with the bytes at `offset`, entirely or not at all.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error — `ErrorKind::NotFound` for bytes the host has
+    /// not made resident — when the range cannot be served whole.
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<()>;
+}
+
+/// Where one mounted archive's payload bytes come from: the data file (every
+/// native reader) or host-supplied random-access ranges (the browser build).
+#[derive(Clone, Debug)]
+enum ArchiveStorage {
+    File,
+    Ranges(Arc<dyn ArchiveRanges>),
 }
 
 #[derive(Clone, Debug)]
@@ -146,6 +168,7 @@ pub struct MountedBig {
     data_path: PathBuf,
     header_path: PathBuf,
     archive: BigArchive,
+    storage: ArchiveStorage,
 }
 
 impl MountedBig {
@@ -180,7 +203,26 @@ impl MountedBig {
             data_path,
             header_path,
             archive,
+            storage: ArchiveStorage::File,
         })
+    }
+
+    /// An archive whose table was read by the host and whose payload is
+    /// served by `ranges`; `data_path`/`header_path` are names only, never
+    /// opened.
+    #[must_use]
+    pub fn with_storage(
+        data_path: PathBuf,
+        header_path: PathBuf,
+        archive: BigArchive,
+        ranges: Arc<dyn ArchiveRanges>,
+    ) -> Self {
+        Self {
+            data_path,
+            header_path,
+            archive,
+            storage: ArchiveStorage::Ranges(ranges),
+        }
     }
 
     #[must_use]
@@ -222,9 +264,9 @@ impl MountedBig {
     /// Returns [`MountError`] when the archive payload cannot be read or the
     /// entry cannot be decompressed and size-validated.
     pub fn read_entry(&self, entry: &BigEntry) -> Result<Vec<u8>, MountError> {
-        let started = Instant::now();
-        let mut file = open_file(&self.data_path)?;
-        let bytes = read_entry(&mut file, entry)?;
+        let started = READ_OBSERVER.get().map(|_| Instant::now());
+        let mut reader = self.reader()?;
+        let bytes = read_entry(&mut reader, entry)?;
         self.observe(entry, bytes.len(), started);
         Ok(bytes)
     }
@@ -265,16 +307,109 @@ impl MountedBig {
         entry: &BigEntry,
         range: Range<u64>,
     ) -> Result<LogicalEntryRange, MountError> {
-        let started = Instant::now();
-        let mut file = open_file(&self.data_path)?;
-        let read = read_entry_range(&mut file, entry, range, &self.data_path)?;
+        let started = READ_OBSERVER.get().map(|_| Instant::now());
+        let mut reader = self.reader()?;
+        let read = read_entry_range(&mut reader, entry, range, &self.data_path)?;
         self.observe(entry, read.bytes.len(), started);
         Ok(read)
     }
 
-    fn observe(&self, entry: &BigEntry, bytes: usize, started: Instant) {
-        if let Some(observer) = READ_OBSERVER.get() {
-            observer(&ArchiveRead { archive: &self.data_path, entry, bytes, elapsed: started.elapsed() });
+    /// The entry's stored bytes as they sit in the data file: no `RefPack`
+    /// expansion, no size validation. The boot-manifest recorder uses this to
+    /// prefetch exactly the spans the loader will read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MountError`] when the stored payload cannot be read.
+    pub fn read_stored(&self, entry: &BigEntry) -> Result<Vec<u8>, MountError> {
+        let mut reader = self.reader()?;
+        read_stored(&mut reader, entry, &self.data_path)
+    }
+
+    /// The payload reader the storage serves: the data file, or a cursor
+    /// over host-supplied ranges. Errors map exactly as [`open_file`]'s do.
+    fn reader(&self) -> Result<ArchiveReader, MountError> {
+        Ok(match &self.storage {
+            ArchiveStorage::File => ArchiveReader::File(open_file(&self.data_path)?),
+            ArchiveStorage::Ranges(ranges) => ArchiveReader::Ranges(RangesCursor {
+                ranges: Arc::clone(ranges),
+                position: 0,
+            }),
+        })
+    }
+
+    fn observe(&self, entry: &BigEntry, bytes: usize, started: Option<Instant>) {
+        if let (Some(observer), Some(started)) = (READ_OBSERVER.get(), started) {
+            observer(&ArchiveRead {
+                archive: &self.data_path,
+                entry,
+                bytes,
+                elapsed: started.elapsed(),
+            });
+        }
+    }
+}
+
+/// One mounted archive's payload reader: the file or the host's ranges.
+enum ArchiveReader {
+    File(File),
+    Ranges(RangesCursor),
+}
+
+impl Read for ArchiveReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::File(file) => file.read(buffer),
+            Self::Ranges(cursor) => cursor.read(buffer),
+        }
+    }
+}
+
+impl Seek for ArchiveReader {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        match self {
+            Self::File(file) => file.seek(position),
+            Self::Ranges(cursor) => cursor.seek(position),
+        }
+    }
+}
+
+/// A seek-and-read cursor over host-supplied ranges. The mount read paths
+/// only ever `seek(SeekFrom::Start(_))` and `read_exact`, so other seek
+/// forms are unsupported rather than guessed at.
+struct RangesCursor {
+    ranges: Arc<dyn ArchiveRanges>,
+    position: u64,
+}
+
+impl Read for RangesCursor {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        self.ranges.read_at(self.position, buffer)?;
+        self.position = self
+            .position
+            .checked_add(
+                u64::try_from(buffer.len())
+                    .map_err(|_| io::Error::new(io::ErrorKind::Unsupported, "read too large"))?,
+            )
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "read past the end"))?;
+        Ok(buffer.len())
+    }
+}
+
+impl Seek for RangesCursor {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        match position {
+            SeekFrom::Start(offset) => {
+                self.position = offset;
+                Ok(offset)
+            }
+            SeekFrom::Current(_) | SeekFrom::End(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "host range storage supports only SeekFrom::Start",
+            )),
         }
     }
 }
@@ -304,7 +439,9 @@ impl MountSet {
     #[must_use]
     pub fn contains_path(&self, path: &str) -> bool {
         let normalized = normalize_game_path(path);
-        self.archives.iter().any(|mounted| mounted.archive.find_path(&normalized).is_some())
+        self.archives
+            .iter()
+            .any(|mounted| mounted.archive.find_path(&normalized).is_some())
     }
 
     /// Resolves a virtual game path in mount order.
@@ -448,6 +585,31 @@ fn open_file(path: &Path) -> Result<File, MountError> {
         path: path.to_owned(),
         source,
     })
+}
+
+/// One entry's stored span as it sits in the data file: seek, read, no
+/// expansion, no validation. The manifest recorder prefetched exactly this.
+fn read_stored(
+    reader: &mut (impl Read + Seek),
+    entry: &BigEntry,
+    data_path: &Path,
+) -> Result<Vec<u8>, MountError> {
+    reader
+        .seek(SeekFrom::Start(entry.offset))
+        .map_err(|source| MountError::Io {
+            path: data_path.to_owned(),
+            source,
+        })?;
+    let stored_size = usize::try_from(entry.stored_size)
+        .map_err(|_| MountError::StoredSizeTooLarge(entry.stored_size))?;
+    let mut stored = vec![0_u8; stored_size];
+    reader
+        .read_exact(&mut stored)
+        .map_err(|source| MountError::Io {
+            path: data_path.to_owned(),
+            source,
+        })?;
+    Ok(stored)
 }
 
 fn read_archive_header(path: &Path) -> Result<BigArchive, MountError> {
@@ -706,6 +868,7 @@ mod tests {
                     stored_size,
                 )],
             },
+            storage: ArchiveStorage::File,
         }
     }
 
@@ -1011,5 +1174,64 @@ mod tests {
         }
         assert_eq!(SKATE2_ARCHIVES[4].group, MountGroup::Load);
         assert!(SKATE2_ARCHIVES[4].use_external_header);
+    }
+
+    /// The same archive served from the file and from in-memory spans must
+    /// read identically through every read shape the mount offers.
+    #[test]
+    fn storage_seam_serves_file_reads_identically() {
+        use crate::resident_spans::ResidentSpans;
+        let payload: &[u8] = b"resident-span payload bytes, exactly as stored";
+        let file = TestFile::new(payload);
+        let from_file = mounted_named(&file, "data\\test\\span.bin", payload.len() as u64);
+        let spans = ResidentSpans::new(file.path.display().to_string());
+        spans.insert(0, payload.to_vec());
+        let from_spans = MountedBig::with_storage(
+            file.path.clone(),
+            file.path.clone(),
+            from_file.archive().clone(),
+            std::sync::Arc::new(spans),
+        );
+        for mounted in [&from_file, &from_spans] {
+            assert_eq!(mounted.read_path("data\\test\\span.bin").unwrap(), payload);
+            let entry = mounted.archive().entries[0].clone();
+            assert_eq!(mounted.read_entry(&entry).unwrap(), payload);
+            assert_eq!(
+                mounted
+                    .read_path_range("data\\test\\span.bin", 8..14)
+                    .unwrap()
+                    .bytes,
+                &payload[8..14]
+            );
+            assert_eq!(mounted.read_stored(&entry).unwrap(), payload);
+        }
+    }
+
+    /// A span the host did not make resident is an honest `NotFound` I/O
+    /// error on every read shape, and the miss is logged.
+    #[test]
+    fn storage_seam_reports_missing_spans_as_not_found() {
+        use crate::resident_spans::ResidentSpans;
+        let payload: &[u8] = b"only part of this is resident";
+        let file = TestFile::new(payload);
+        let from_file = mounted_named(&file, "data\\test\\partial.bin", payload.len() as u64);
+        let spans = std::sync::Arc::new(ResidentSpans::new(file.path.display().to_string()));
+        // Resident from 8; the read starts before it.
+        spans.insert(8, payload[8..].to_vec());
+        let ranges: std::sync::Arc<dyn crate::mount::ArchiveRanges> = spans.clone();
+        let from_spans = MountedBig::with_storage(
+            file.path.clone(),
+            file.path.clone(),
+            from_file.archive().clone(),
+            ranges,
+        );
+        let error = from_spans.read_path("data\\test\\partial.bin").unwrap_err();
+        assert!(
+            matches!(&error, MountError::Io { source, .. } if source.kind() == io::ErrorKind::NotFound),
+            "the miss surfaces as a NotFound I/O error: {error:?}"
+        );
+        // The whole-entry read is one `read_exact` of the stored size at the
+        // entry offset, so the miss is that whole span — not a prefix probe.
+        assert_eq!(spans.misses(), vec![(0, payload.len())]);
     }
 }
