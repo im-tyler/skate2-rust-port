@@ -33,6 +33,7 @@ web-sys = { version = "=0.3.106", features = [
     "Gamepad",
     "GamepadButton",
     "GamepadMappingType",
+    "Headers",
     "HtmlCanvasElement",
     "HtmlInputElement",
     "Location",

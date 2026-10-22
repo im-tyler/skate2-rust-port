@@ -328,6 +328,7 @@ async fn run_assets_report<S: game_files::ByteSource>(source: S) {
         found,
         missing,
         parsed,
+        entry_read,
     } = game_files::inspect(&source).await;
     let Some(document) = web_sys::window().and_then(|window| window.document()) else {
         return;
@@ -366,6 +367,10 @@ async fn run_assets_report<S: game_files::ByteSource>(source: S) {
             if let Some(node) = row(&line) {
                 archives.append_child(&node).ok();
             }
+        }
+        // Step two's proof line: the ranged entry read.
+        if let Some(node) = row(&format!("ranged read: {entry_read}")) {
+            archives.append_child(&node).ok();
         }
     }
     if let Some(panel) = panel {

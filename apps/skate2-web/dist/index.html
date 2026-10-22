@@ -7,8 +7,8 @@
   <!-- The cdylib (lib.rs `start`), not the desktop-only debug binary. -->
   
 <script type="module">
-import init, * as bindings from '/skate2-web-1b9662748bf9b6fc.js';
-const wasm = await init({ module_or_path: '/skate2-web-6e1c2517a013af32_bg.wasm' });
+import init, * as bindings from '/skate2-web-3e55c33c0434615f.js';
+const wasm = await init({ module_or_path: '/skate2-web-14f418e4d58ae4c_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -144,7 +144,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
       word-break: break-all;
     }
   </style>
-<link rel="modulepreload" href="/skate2-web-1b9662748bf9b6fc.js" crossorigin="anonymous" integrity="sha384-LLVbx0Ept8alr/SYPzBO6xV+fbjNqLU89lm9j2gIB9lk1CcCcozWx3/D7by0lRKI"><link rel="preload" href="/skate2-web-6e1c2517a013af32_bg.wasm" crossorigin="anonymous" integrity="sha384-VAb0hNgN6kzQX40ddzf/HaULlT43Jf++nQi2XtFDOAHw/iV9p1K9e3Z9g7UHcTXi" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/skate2-web-3e55c33c0434615f.js" crossorigin="anonymous" integrity="sha384-Ec2ocVVLtUer0ocJiK477IEncxTRB/u2nCfCi2KXZ2vjlwBQhIAp6Ok6gJz0EO7t"><link rel="preload" href="/skate2-web-14f418e4d58ae4c_bg.wasm" crossorigin="anonymous" integrity="sha384-d740NkE5u9IpJ1dC2Opd6zAwfIjBAdk/dXcNRyffmnqDa4ccG2+6gHqZJC1yBaAJ" as="fetch" type="application/wasm"></head>
 <body>
   <canvas id="skate2-canvas" tabindex="0"></canvas>
 

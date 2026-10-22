@@ -17,7 +17,23 @@ blocks a proper port.
 | Build + serve workflow (trunk) | done — `trunk build --release` / `trunk serve` |
 | Keyboard mapped to the controller input system | done — `XboxPadSample`s from ramped keys, unit-tested |
 | Game bytes in the browser (asset step one) | done — picker and `?http=` sources; all 20 mounted archives found, `globallocators.big` and `db.big` tables parsed in WASM against a real dump |
+| Ranged streaming (asset step two) | done — entries read out of archives over HTTP `Range` (or `Blob::slice` for the picker), `RefPack` expanded, hashed sizes validated: `db.big`'s `skater.vlt` (851,632 bytes) read whole through ranged requests |
 | Real renderer / session / original assets in the browser | not started — see the blockers below |
+
+## The port's road
+
+Worked one milestone at a time, each verified against a real dump before it
+counts:
+
+| # | Milestone | State |
+| --- | --- | --- |
+| 1 | Bytes and BIG table parsing in the browser | done |
+| 2 | Ranged streaming: entries out of archives, `RefPack`, hashed-size checks | done |
+| 3 | Vault attributes: parse the `.vlt` payloads the entries carry | next |
+| 4 | The async mount set: all twenty archives mounted in WASM | |
+| 5 | Threads → cooperative futures for core's streaming | |
+| 6 | Audio (Web Audio + XMA) and networking (WebSockets) | |
+| 7 | The real renderer and booting a session in the tab | |
 
 ## Building and running
 
@@ -174,4 +190,7 @@ problem. The assets panel is verified the same way: with `?http=` aimed at a
 served extracted dump it reports 20/20 archives and parses
 `globallocators.big` (18 entries) and `db.big` (`skater.vlt`/`.bin`,
 `ChallengeCore.vlt`/`.bin`) in WASM; the picker needs a human's folder choice
-and so is hand-tested.
+and so is hand-tested. Step two is verified the same way: the ranged read
+line shows `skater.vlt`'s 851,632 bytes arriving whole through ranged
+requests (a 206 from the range-aware test server; a Range-ignoring server
+falls back to slicing the whole response, as the code does explicitly).
