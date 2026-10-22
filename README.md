@@ -4,9 +4,9 @@
 
 **Skate 2, rebuilt as a native PC game in Rust.**
 
-Windows · Linux · Online play
+Windows · Linux · macOS · Online play
 
-[Download](https://github.com/skate6743/skate2-rust-port/releases/latest) ·
+[Download](https://github.com/im-tyler/skate2-rust-port/releases/latest) ·
 [How to play](#how-to-play) ·
 [Build from source](#building-from-source)
 
@@ -181,6 +181,11 @@ it matters, against the original game running. Some things are still partly unfi
 
 ## Credits
 
+- **[skate6743/skate2-rust-port](https://github.com/skate6743/skate2-rust-port)** — the Skate 2
+  Rust Port this repository continues. Every commit up to and including
+  *Skate 2 Rust Port 0.2.4* is that project's work under its MIT license; this
+  repository's additions build on it with the original copyright preserved in
+  [LICENSE](LICENSE).
 - **EA Black Box**, for making Skate 2.
 - **FFmpeg**, whose WMA Pro decoder `skate2-xma` ports to play the game's XMA audio.
 - **wgpu, winit, cpal, SDL3** and the rest of the Rust ecosystem this is built on.
