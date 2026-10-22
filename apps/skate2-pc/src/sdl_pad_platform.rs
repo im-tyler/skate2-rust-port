@@ -1,10 +1,15 @@
 //! The pads where Windows' pad API does not exist (Linux): every pad through SDL3
 //! (`crate::sdl_pads`), each reported as `XInputGetState` and `XInputGetCapabilities` report a
 //! wired Xbox 360 gamepad. Native mapping, polling cadence and caches live in core.
+//! When no SDL gamepad is connected, the keyboard stands in as slot zero
+//! (`crate::keyboard_pads`, PC port addition), as the Skate 3 browser port's
+//! loader does: slot zero always answers, with the keyboard's digital sample.
+use crate::keyboard_pads::KeyboardPad;
 use crate::sdl_pads::SdlPads;
 use skate2_core::{
     PadCapabilitiesResult, PadPlatform, PadStateResult, PadVibration, XboxPadSample,
 };
+use winit::{event::ElementState, keyboard::PhysicalKey};
 
 /// `ERROR_DEVICE_NOT_CONNECTED`: what `XInputGetState` returns for a slot with no pad.
 const DEVICE_NOT_CONNECTED: u32 = 1167;
@@ -15,10 +20,26 @@ pub(crate) struct SdlPadPlatform {
     /// Explicit diagnostic replay sample for controller zero; None reads SDL.
     pub(crate) demo_sample: Option<XboxPadSample>,
     sdl: Option<SdlPads>,
+    /// The keyboard behind slot zero when no SDL gamepad is connected.
+    keyboard: KeyboardPad,
 }
 impl SdlPadPlatform {
     pub(crate) fn new(demo_sample: Option<XboxPadSample>, sdl: Option<SdlPads>) -> Self {
-        Self { demo_sample, sdl }
+        Self {
+            demo_sample,
+            sdl,
+            keyboard: KeyboardPad::default(),
+        }
+    }
+
+    /// One keyboard event for the fallback pad; text entry clears it instead.
+    pub(crate) fn keyboard_key(&mut self, key: PhysicalKey, state: ElementState) {
+        self.keyboard.key_event(key, state);
+    }
+
+    /// Releases the fallback pad's keys, when focus or the keyboard leaves it.
+    pub(crate) fn keyboard_clear(&mut self) {
+        self.keyboard.clear();
     }
 }
 #[derive(Debug)]
@@ -46,6 +67,18 @@ impl PadPlatform for SdlPadPlatform {
             }
         }
         let Some((packet, sample)) = self.sdl.as_mut().and_then(|sdl| sdl.claim(index)) else {
+            // No SDL gamepad in this slot: the keyboard answers for slot zero,
+            // as the Skate 3 browser port's loader does.
+            if index == 0 {
+                let (packet, sample) = self.keyboard.claim();
+                if std::env::var_os("SKATE2_TRACE_XINPUT").is_some() {
+                    eprintln!("keyboard slot=0 packet={packet} sample={sample:?}");
+                }
+                return Ok(PadStateResult {
+                    status: 0,
+                    state: Some((packet, sample)),
+                });
+            }
             return Ok(PadStateResult {
                 status: DEVICE_NOT_CONNECTED,
                 state: None,
@@ -78,7 +111,10 @@ impl PadPlatform for SdlPadPlatform {
             });
         }
         // As DS4Windows showed its pads on Windows: type and subtype gamepad, no wireless flag.
-        Ok(if self.sdl.as_mut().and_then(|sdl| sdl.claim(index)).is_some() {
+        // Slot zero is always answered — by the keyboard when no gamepad is connected.
+        Ok(if index == 0
+            || self.sdl.as_mut().and_then(|sdl| sdl.claim(index)).is_some()
+        {
             PadCapabilitiesResult {
                 status: 0,
                 device_type: Some(1),
@@ -97,6 +133,10 @@ impl PadPlatform for SdlPadPlatform {
     fn set_state(&mut self, index: u32, vibration: PadVibration) -> Result<u32, Self::Error> {
         Ok(if self.sdl.as_mut().is_some_and(|sdl| sdl.vibrate(index, vibration)) {
             0
+        } else if index == 0 {
+            // The keyboard accepts vibration like the browser pad does: kept,
+            // but there is nothing to rumble.
+            0
         } else {
             DEVICE_NOT_CONNECTED
         })
@@ -108,9 +148,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slots_without_sdl_read_as_xinput_empty_slots() {
+    fn keyboard_answers_slot_zero_and_the_rest_stay_empty() {
         let mut platform = SdlPadPlatform::new(None, None);
-        for index in 0..4 {
+        // Slot zero: capabilities as a wired gamepad, a neutral keyboard sample.
+        let caps = platform.get_capabilities(0, FLAG_GAMEPAD).unwrap();
+        assert_eq!(
+            (caps.status, caps.device_type, caps.subtype, caps.flags),
+            (0, Some(1), Some(1), Some(0))
+        );
+        let state = platform.get_state(0).unwrap();
+        let (packet, sample) = state.state.expect("the keyboard is always present");
+        assert_eq!((state.status, packet, sample.buttons), (0, 1, 0));
+        assert_eq!(platform.set_state(0, PadVibration { left: 100, right: 100 }).unwrap(), 0);
+        // The other slots read as XInput's empty slots.
+        for index in 1..4 {
             let state = platform.get_state(index).unwrap();
             assert_eq!((state.status, state.state.is_some()), (DEVICE_NOT_CONNECTED, false));
             let caps = platform.get_capabilities(index, FLAG_GAMEPAD).unwrap();
@@ -120,5 +171,16 @@ mod tests {
             assert_eq!(platform.set_state(index, vibration).unwrap(), DEVICE_NOT_CONNECTED);
         }
         assert!(platform.get_capabilities(0, 0).is_err());
+        // Keyboard events reach the sample through the platform.
+        platform.keyboard_key(
+            winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Space),
+            ElementState::Pressed,
+        );
+        let state = platform.get_state(0).unwrap();
+        let (_, sample) = state.state.expect("slot zero still present");
+        assert_eq!(sample.buttons, 0x1000);
+        platform.keyboard_clear();
+        let state = platform.get_state(0).unwrap();
+        assert_eq!(state.state.expect("slot zero still present").1.buttons, 0);
     }
 }

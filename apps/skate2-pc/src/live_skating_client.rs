@@ -931,6 +931,20 @@ impl LiveSkatingClient {
     }
 
     fn window_event(&mut self, event: &WindowEvent) -> RenderResult<()> {
+        // The keyboard pad (PC port addition, the Skate 3 browser port's
+        // scheme): while text is being typed the keys are text, a window that
+        // loses focus releases them, and every other key event feeds slot
+        // zero's fallback sample. Windows keeps its XInput slots untouched.
+        #[cfg(not(windows))]
+        if self.session.extras_text_entry_active() {
+            self.pad.keyboard_clear();
+        } else if let WindowEvent::KeyboardInput { event, .. } = event {
+            self.pad.keyboard_key(event.physical_key, event.state);
+        }
+        #[cfg(not(windows))]
+        if let WindowEvent::Focused(false) = event {
+            self.pad.keyboard_clear();
+        }
         if self.focused && self.session.extras_text_entry_active()
             && let WindowEvent::KeyboardInput { event, .. } = event
             && event.state == winit::event::ElementState::Pressed

@@ -66,7 +66,12 @@ PC. Requires your own legally obtained Xbox 360 copy of Skate 2 to run, you will
 - **Your own copy of retail Skate 2 for Xbox 360**, extracted to a folder: the one that holds
   `default.xex` and the game's `data` folder. A disc image has to be extracted first.
 - A controller. Xbox and PlayStation controllers work on Windows; on Linux and the Steam Deck,
-  every controller SDL3 knows works. Skating isn't playable on keyboard and mouse yet, but may be implemented later.
+  every controller SDL3 knows works. When no controller is connected, the
+  keyboard stands in as pad one with the Skate 3 browser port's scheme
+  (PC addition, `apps/skate2-pc/src/keyboard_pads.rs`): `Space` A, `E` B,
+  `Q` X, `R` Y, `Z`/`X` shoulders, `Escape` Start, `Tab` Back, `V`/`B` stick
+  presses, `IJKL` d-pad, `WASD` steering, arrows flicking, `Shift` left
+  trigger, `C` right trigger.
 
 ### Windows
 

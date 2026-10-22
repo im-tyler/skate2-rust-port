@@ -19,6 +19,7 @@ mod juice_platform;
 #[cfg(windows)]
 mod windows_pad_platform;
 mod local_calendar;
+mod keyboard_pads;
 mod sdl_pads;
 #[cfg(not(windows))]
 mod sdl_pad_platform;
