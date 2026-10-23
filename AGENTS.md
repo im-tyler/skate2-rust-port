@@ -66,7 +66,8 @@ doc comment when an address is known.
 
 ## Conventions
 
-- `unsafe` is forbidden. Clippy `all` and `pedantic` are on; the gate denies warnings.
+- `unsafe` is forbidden. Clippy `all` and `pedantic` are on; the gate denies new
+  warnings in touched files and ratchets the workspace total down (Validation gate).
 - Source files mix CRLF and LF line endings, sometimes within one file. An edit keeps
   each line's existing ending; never normalize a file.
 - Native addresses belong in doc comments. Explanations that outgrow a comment belong in
@@ -104,13 +105,32 @@ doc comment when an address is known.
 
 ## Validation gate
 
-Run validation proportional to the change. The strict repository checkpoint is:
+Run validation proportional to the change. The repository checkpoint is:
 
 ```powershell
-cargo fmt --all -- --check
 cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+python3 tools/clippy_ratchet.py
 ```
+
+plus, scoped to every file a change touches (no new diagnostics, formatted):
+
+```powershell
+cargo fmt --all -- --check        # or rustfmt --check --edition 2024 <touched files>
+cargo clippy -p <crate> --all-targets
+```
+
+The tree carries a historical lint backlog (`tools/clippy-baseline.txt`):
+workspace-wide `cargo clippy --all-targets -- -D warnings` does not pass yet,
+so it is not the gate. The ratchet enforces the hard half — the workspace
+warning total may only go down (`--update` records an intentional drop in the
+same change) — and touched files must add nothing. The toolchain is pinned by
+`rust-toolchain.toml`; the baseline was recorded on it, and a toolchain bump
+re-records the baseline in the same change.
+
+The updater's tests are the one platform-scoped suite: releases ship for
+Windows and Linux, so `Platform::current()` is `None` on a macOS dev machine
+and those tests fail there by design — run or CI them against either shipping
+platform.
 
 Parser, world, renderer, and physics changes also require the relevant real-data
 corpus/probe. Physics, animation, tricks, and state-machine parity ultimately

@@ -19,7 +19,9 @@ members = [
 version = "0.2.4"
 edition = "2024"
 license = "MIT"
-rust-version = "1.85"
+# The true minimum: the tree uses `cast_signed`/`cast_unsigned` (stable 1.87).
+# The day-to-day toolchain is pinned exactly by `rust-toolchain.toml`.
+rust-version = "1.87"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

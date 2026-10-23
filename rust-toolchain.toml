@@ -1,0 +1,8 @@
+# The repository's toolchain, pinned exactly (rustup installs it on first use).
+#
+# Every recorded measurement and the clippy ratchet baseline
+# (`tools/clippy-baseline.txt`) were taken on this version; bump it
+# deliberately, and re-record the baseline in the same change.
+[toolchain]
+channel = "1.99.0"
+targets = ["wasm32-unknown-unknown"]

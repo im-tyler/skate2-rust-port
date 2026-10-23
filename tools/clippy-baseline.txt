@@ -1,0 +1,26 @@
+# The workspace clippy ratchet baseline, enforced by tools/clippy_ratchet.py.
+# The total may only go down. Record an intentional drop with --update in the
+# same change that caused it. Per-crate lines are context, not enforced.
+rustc: 1.99.0
+total: 16861
+#   skate2-audio (lib test): 2087
+#   skate2-audio (lib): 2048
+#   skate2-core (lib test): 11308
+#   skate2-core (lib): 10136
+#   skate2-core (test "boot_probe_threaded"): 10
+#   skate2-core (test "boot_probe_threadless"): 10
+#   skate2-formats (lib test): 754
+#   skate2-formats (lib): 700
+#   skate2-net (example "frame_lab"): 12
+#   skate2-net (example "frame_stats"): 10
+#   skate2-net (example "server_load"): 1
+#   skate2-net (lib test): 42
+#   skate2-net (lib): 30
+#   skate2-pc (bin "skate2-pc" test): 2312
+#   skate2-pc (bin "skate2-pc"): 2209
+#   skate2-update (lib test): 1
+#   skate2-update (lib): 1
+#   skate2-web (lib test): 6
+#   skate2-web (lib): 5
+#   skate2-xma (lib test): 117
+#   skate2-xma (lib): 114
