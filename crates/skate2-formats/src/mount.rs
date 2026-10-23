@@ -1227,8 +1227,8 @@ mod tests {
         );
         let error = from_spans.read_path("data\\test\\partial.bin").unwrap_err();
         assert!(
-            matches!(&error, MountError::Io { source, .. } if source.kind() == io::ErrorKind::NotFound),
-            "the miss surfaces as a NotFound I/O error: {error:?}"
+            matches!(&error, MountError::Io { source, .. } if source.kind() == io::ErrorKind::WouldBlock),
+            "the miss surfaces as a WouldBlock I/O error: {error:?}"
         );
         // The whole-entry read is one `read_exact` of the stored size at the
         // entry offset, so the miss is that whole span — not a prefix probe.

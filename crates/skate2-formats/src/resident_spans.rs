@@ -1,29 +1,51 @@
 //! In-memory stored spans of one archive's data file: the browser build's
 //! [`crate::mount::ArchiveRanges`] implementation (`docs/WEB_PORT_M5_PLAN`).
 //! The web app prefetches the spans a recorded boot manifest names before
-//! core asks; a read outside the resident spans is an honest error, and the
-//! miss is logged so the manifest's closure can be proven.
+//! core asks. A read outside the resident spans is a **not-ready** answer:
+//! `ErrorKind::WouldBlock` with the miss logged, and — when the host
+//! installed one — a miss handler called outside the span lock, so the host
+//! can fetch the span on demand (`docs/WEB_PORT_M5A_PLAN`). A read outside
+//! the resident spans asks to be made resident and retried.
 
 use std::{
     collections::BTreeMap,
-    io,
+    fmt, io,
     ops::Bound,
     sync::{Arc, Mutex},
 };
 
 /// The stored spans of one archive, keyed by their start offset, plus the
 /// log of reads that fell outside them.
-#[derive(Debug, Default)]
 pub struct ResidentSpans {
     /// The archive's data-file name, for miss messages.
     archive: String,
     state: Mutex<SpansState>,
+    /// The host's on-demand fetch kick, called once per miss, outside the
+    /// span lock. Must not read this span set (the lock is not re-entrant
+    /// on the browser's single thread) and must not panic.
+    miss_handler: Option<Box<dyn Fn(u64, usize) + Send + Sync>>,
+}
+
+impl fmt::Debug for ResidentSpans {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResidentSpans")
+            .field("archive", &self.archive)
+            .field("handler", &self.miss_handler.as_ref().map_or(0, |_| 1))
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Default)]
 struct SpansState {
     spans: BTreeMap<u64, Arc<[u8]>>,
     misses: Vec<(u64, usize)>,
+}
+
+impl Default for ResidentSpans {
+    fn default() -> Self {
+        Self::new(String::new())
+    }
 }
 
 impl ResidentSpans {
@@ -33,7 +55,18 @@ impl ResidentSpans {
         Self {
             archive: archive.into(),
             state: Mutex::new(SpansState::default()),
+            miss_handler: None,
         }
+    }
+
+    /// Installs the host's miss handler: called with the miss's offset and
+    /// length after the miss is logged and the span lock released, so the
+    /// host can fetch the span on demand. The handler must not read this
+    /// span set (its lock is not re-entrant on a single thread).
+    #[must_use]
+    pub fn with_miss_handler(mut self, handler: Box<dyn Fn(u64, usize) + Send + Sync>) -> Self {
+        self.miss_handler = Some(handler);
+        self
     }
 
     /// Makes the stored span beginning at `offset` resident.
@@ -63,15 +96,6 @@ impl ResidentSpans {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-
-    /// Records a miss and returns its error.
-    fn miss(&self, state: &mut SpansState, offset: u64, length: usize) -> io::Error {
-        state.misses.push((offset, length));
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("not resident: {} {offset}+{length}", self.archive),
-        )
-    }
 }
 
 impl crate::mount::ArchiveRanges for ResidentSpans {
@@ -81,35 +105,49 @@ impl crate::mount::ArchiveRanges for ResidentSpans {
         }
         let length = u64::try_from(buffer.len())
             .map_err(|_| io::Error::new(io::ErrorKind::Unsupported, "read too large"))?;
-        let mut state = self.lock();
-        let Some((&start, span)) = state
+        let miss = {
+            let mut state = self.lock();
+            if let Ok(bytes) = Self::serving_span(&state, offset, length) {
+                buffer.copy_from_slice(bytes);
+                return Ok(());
+            }
+            // Spans are never stitched: a read crossing into the next one
+            // is a miss, because only whole stored spans are resident. The
+            // miss is logged under the lock…
+            state.misses.push((offset, buffer.len()));
+            (offset, buffer.len())
+        };
+        // …and the host's fetch kick fires outside it, so the handler may
+        // not re-enter this span set but may take its own time.
+        if let Some(handler) = &self.miss_handler {
+            handler(miss.0, miss.1);
+        }
+        Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!("not resident: {} {}+{}", self.archive, miss.0, miss.1),
+        ))
+    }
+}
+
+impl ResidentSpans {
+    /// The resident bytes at `offset..offset+length`, when one span holds
+    /// the whole read; `Err(())` is a miss.
+    fn serving_span(state: &SpansState, offset: u64, length: u64) -> Result<&[u8], ()> {
+        let (&start, span) = state
             .spans
             .range((Bound::Unbounded, Bound::Included(offset)))
             .next_back()
-        else {
-            return Err(self.miss(&mut state, offset, buffer.len()));
-        };
+            .ok_or(())?;
         let within = offset - start;
-        let end = within
-            .checked_add(length)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "read past the span end"))?;
-        // Spans are never stitched: a read crossing into the next one is a
-        // miss, because the manifest named a span the boot does not read.
+        let end = within.checked_add(length).ok_or(())?;
         let (within, end) = (usize::try_from(within), usize::try_from(end));
         let (Ok(within), Ok(end)) = (within, end) else {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "span bounds past memory",
-            ));
+            return Err(());
         };
-        let Some(bytes) = span.get(within..end) else {
-            return Err(self.miss(&mut state, offset, buffer.len()));
-        };
-        if bytes.len() != buffer.len() {
-            return Err(self.miss(&mut state, offset, buffer.len()));
-        }
-        buffer.copy_from_slice(bytes);
-        Ok(())
+        let bytes = span.get(within..end).ok_or(())?;
+        (bytes.len() == usize::try_from(length).map_err(|_| ())?)
+            .then_some(bytes)
+            .ok_or(())
     }
 }
 
@@ -142,7 +180,11 @@ mod tests {
         let spans = spans_with(&[(16, b"abcdefgh")]);
         let mut buffer = [0_u8; 2];
         let error = crate::mount::ArchiveRanges::read_at(&spans, 0, &mut buffer).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::WouldBlock,
+            "a miss asks to be made resident and retried"
+        );
         assert_eq!(spans.misses(), vec![(0, 2)]);
     }
 
@@ -158,6 +200,30 @@ mod tests {
         let mut four = [0_u8; 4];
         crate::mount::ArchiveRanges::read_at(&spans, 20, &mut four).unwrap();
         assert_eq!(&four, b"efgh");
+    }
+
+    #[test]
+    fn the_miss_handler_fires_outside_the_span_lock() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let calls = Arc::new(AtomicU32::new(0));
+        let handler_seen = Arc::clone(&seen);
+        let handler_calls = Arc::clone(&calls);
+        let spans = ResidentSpans::new("on-demand.big").with_miss_handler(Box::new(
+            move |offset, length| {
+                handler_seen.lock().unwrap().push((offset, length));
+                handler_calls.fetch_add(1, Ordering::Relaxed);
+            },
+        ));
+        let mut buffer = [0_u8; 4];
+        let error = crate::mount::ArchiveRanges::read_at(&spans, 32, &mut buffer).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "one kick per miss");
+        assert_eq!(*seen.lock().unwrap(), vec![(32, 4)]);
+        // The miss is logged, and a repeat miss kicks again.
+        let _ = crate::mount::ArchiveRanges::read_at(&spans, 32, &mut buffer);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(spans.misses(), vec![(32, 4), (32, 4)]);
     }
 
     #[test]
