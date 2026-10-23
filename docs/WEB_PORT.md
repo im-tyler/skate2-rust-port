@@ -21,6 +21,7 @@ blocks a proper port.
 | Vault attributes (asset step three) | done — the `.vlt`/`.bin` pair parsed in WASM: 675 types, 304 classes, 4,709 definitions, and `physics.default`'s layout read live — gravity `-9.8` (`0xc11ccccd`), the corpus test's pinned word |
 | The mount set (asset step four) | done — all twenty archive tables mounted in `RemoteMountSet` (18,274 entries), virtual-path reads routed across archives in mount order: `skater.vlt` via `db.big`, a shader XML via `render.big` |
 | Core streaming in the tab (milestone five) | done — the real `SelectedWorldStream` + `SelectedResidentStartup` boot runs single-threaded in the browser over prefetched spans (2.7 MiB, 12 entries) and reports `done — matches native`: 284 high collections, the corpus bounds bits, 21 plans, (21, 80) retained — identical to the native threaded oracle (`docs/WEB_PORT_M5_PLAN.md`) |
+| On-demand streaming (milestone 5a) | done — a resident-span miss answers `WouldBlock` instead of failing; the read scheduler retries (`SourceRead::Retry`) and the collection producer reports `Reading` without latching, while the host's miss handler fetches the missed span over HTTP — so a second, unprefetched district collection loads on demand in the tab (1 span, 62 KiB, fetched once; 767 misses retried) with the extended report identical to the native pin (`docs/WEB_PORT_M5A_PLAN.md`) |
 | Real renderer / session / original assets in the browser | not started — see the blockers below |
 
 ## The port's road
@@ -35,8 +36,8 @@ counts:
 | 3 | Vault attributes: parse the `.vlt` payloads the entries carry | done |
 | 4 | The async mount set: all twenty archives mounted in WASM | done |
 | 5 | Core streaming in the tab (single-threaded, prefetched) | done |
-| 5a | On-demand streaming: a resident-span miss becomes a pending read | next |
-| 6 | Audio (Web Audio + XMA) and networking (WebSockets) | |
+| 5a | On-demand streaming: a resident-span miss becomes a pending read | done |
+| 6 | Audio (Web Audio + XMA) and networking (WebSockets) | next |
 | 7 | The real renderer and booting a session in the tab | |
 
 ## Building and running
@@ -165,7 +166,12 @@ In rough dependency order, with the code that has to move:
    run inline, the read scheduler gained an inline mode with the same pool,
    admission and FIFO, and the boot's bytes are prefetched to memory
    (`MountedBig::with_storage` over `ResidentSpans`) because core reads
-   synchronously everywhere. A native corpus test pair pins threaded and
+   synchronously everywhere. Since milestone 5a the prefetch is a floor,
+   not a ceiling: a read outside the resident spans answers
+   `ErrorKind::WouldBlock`, a host miss handler fetches the span on
+   demand, and the scheduler/producer retry until it lands — the boot
+   manifest is the bootstrap prefetch only, not a closure of what a
+   session will read. A native corpus test pair pins threaded and
    threadless boots to identical reports. Remaining `std::thread` users —
    the animation job pool, the AI/scene/living-world loaders,
    `finish_initial_load`'s sleep loop, remote skater, career saves, the RNG
@@ -213,3 +219,23 @@ hashes (`physics`, `fe`, `characters_marquee`); the `.bin` string table
 does not carry them. Step four mounts the same set: twenty tables, 18,274
 entries, every read routed by virtual path — `skater.vlt` served from
 `db.big`, `data\render\shaders\debug\advertisement.xml` from `render.big`.
+
+Milestone five's boot probe and milestone 5a's on-demand extension are
+verified the same way, against a served dump. The probe drives the real
+`SelectedWorldStream` + `SelectedResidentStartup` boot over the prefetched
+spans; 5a then requests a second district collection the manifest does not
+name. Its reads miss, and the miss becomes a pending read: `ResidentSpans`
+answers `WouldBlock` with the host's fetch kick called outside the span
+lock, the scheduler's `Retry` and the producer's `Reading` hold the line,
+and in the tab the fetched span lands and the load completes. The native
+pin (both corpus tests, threaded and threadless, over span mounts with a
+blocking handler) records the extended report — 284 high collections, the
+corpus bounds bits, 21 + 7 plans, (28, 124) retained at the second
+completion — and the tab's final panel line matches it: `boot probe:
+done — matches native; … on-demand: 1 spans (62 KiB) fetched` (boot 0.2 s,
+longest poll 156 ms). The served-dump access log carries the proof that
+nothing was prefetched for it: one ranged fetch of `worldbam.big` bytes
+479363584-479427583 — an entry no manifest names. One testing note for
+future gates: drive the browser check with real time; headless
+`--virtual-time-budget` starves the cooperative `setTimeout` loop and
+freezes the panel mid-boot.

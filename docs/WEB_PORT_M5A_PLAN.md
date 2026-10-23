@@ -1,5 +1,8 @@
 # Web port milestone 5a: on-demand streaming — a miss becomes a pending read
 
+Executed 2026-10-23 through commits `589c745`..`f684367` (phases a–e) and
+the docs commit; the recorded outcomes live in `docs/WEB_PORT.md`.
+
 Execution plan for milestone 5a of `docs/WEB_PORT.md`. Same rules as
 `docs/WEB_PORT_M5_PLAN.md` section 0 (AGENTS.md binding; line endings; one
 phase = one commit; gates scoped to touched crates on this machine; never
