@@ -431,6 +431,9 @@ pub struct AudioSystem {
     /// The `MusicSystem` singleton (constructed and initialized after the speech system) and
     /// `AudioCore::GetMusicMasterSubMix`.
     music: MusicSystem,
+    /// The explicit seed `enter_world` passes the speech context systems
+    /// (`SpeechSystem::Initialize`'s clock draw natively).
+    speech_context_seed: u32,
     music_master_sub_mix: PluginRef,
     flange_voice: Option<VoiceId>,
     /// AudioSystem constructor8250e39c: eSk8Character_Max.
@@ -554,6 +557,22 @@ impl AudioSystem {
     /// When the mastering or music master voice cannot be created (the core starts empty, so they
     /// always can).
     pub fn new() -> Self {
+        Self::new_with_seeds(SystemSeeds::from_clock())
+    }
+
+    /// [`Self::new`] with every time-derived seed explicit: the constructor
+    /// draws nothing from the clock, so two systems built with the same seeds
+    /// are reproducible (`docs/WEB_PORT_M6_PLAN.md`, phase 1a — the clock
+    /// draws made native renders differ run to run). The contexts seed is
+    /// drawn by [`Self::new`] here rather than at `enter_world`; each was
+    /// per-run random before, and no observable could depend on the instant.
+    ///
+    /// # Panics
+    ///
+    /// When the mastering or music master voice cannot be created (the core
+    /// starts empty, so they always can), as [`Self::new`].
+    #[must_use]
+    pub fn new_with_seeds(seeds: SystemSeeds) -> Self {
         let mut core = AudioCore::new();
         let master = core
             .create_voice(
@@ -571,8 +590,8 @@ impl AudioSystem {
         let global_effects = GlobalEffects::new(&mut core, master_sub_mix);
         let mut aems = Aems::new(Some(master_sub_mix));
         aems.env_send_sub_mix = Some(global_effects.reverb_sub_mix());
-        let speech = Sk8SpeechSystem::new(&mut core, master_sub_mix, global_effects.reverb_sub_mix(), speech::time64_seed());
-        let mut rng = RwRandom::new(clock_seed());
+        let speech = Sk8SpeechSystem::new(&mut core, master_sub_mix, global_effects.reverb_sub_mix(), seeds.speech);
+        let mut rng = RwRandom::new(seeds.music);
         let mut music = MusicSystem::new();
         music.initialize(&mut core, &mut rng);
         Self {
@@ -581,6 +600,7 @@ impl AudioSystem {
             splicer: SpliceManager::new(),
             mixer: DynamicMixer::new(),
             state: GameAudioState::default(),
+            speech_context_seed: seeds.contexts,
             master_sub_mix,
             global_effects,
             speech,
@@ -719,7 +739,7 @@ impl AudioSystem {
         // the context systems.
         self.away_time = 1;
         Sk8SpeechSystem::create_stream_pool(&mut self.core);
-        self.speech.create_context_systems(clock_seed(), speech::game_time(self.core.system_time));
+        self.speech.create_context_systems(self.speech_context_seed, speech::game_time(self.core.system_time));
         self.speech.load_projects("english");
         self.initialized = true;
         self.splicer.load_bank(fe_bank, SPLICE_FE).map_err(|e| format!("Sk82_FE.bnk: {e:?}"))?;
@@ -2087,7 +2107,72 @@ impl Default for AudioSystem {
     }
 }
 
+/// The three time-derived seeds the audio system draws natively: `InitApp`'s
+/// `mftb` (the music system's `RwRandom`), `SPCH_Init`'s `time64` game seed,
+/// and `SpeechSystem::Initialize`'s context seed. A host that needs
+/// reproducible audio passes its own; the values stand in for the console's
+/// time base, not for any behavioral constant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SystemSeeds {
+    /// `InitApp`'s `mftb` seed: the music system's `RwRandom`.
+    pub music: u32,
+    /// `SPCH_Init`'s game seed: the low word of `time64(NULL)`.
+    pub speech: u32,
+    /// `SpeechSystem::Initialize`'s context-system seed.
+    pub contexts: u32,
+}
+
+impl SystemSeeds {
+    /// The native behavior: all three drawn from the clock now.
+    #[must_use]
+    pub fn from_clock() -> Self {
+        Self {
+            music: clock_seed(),
+            speech: speech::time64_seed(),
+            contexts: clock_seed(),
+        }
+    }
+}
+
 /// A seed from the clock, standing in for the time base (`mftb`) `InitApp` seeds with.
 fn clock_seed() -> u32 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.subsec_nanos() ^ elapsed.as_secs() as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two systems built with the same explicit seeds construct the same
+    /// voice graph and render identical frames: the seeds are inputs, not
+    /// clock draws (`docs/WEB_PORT_M6_PLAN.md`, phase 1a — the clock draws
+    /// made native renders differ run to run). No banks are loaded here, so
+    /// the render is the empty mastering path; the bank-fed determinism proof
+    /// is the phase 1c corpus oracle.
+    #[test]
+    fn identical_seeds_render_identical_frames() {
+        let seeds = SystemSeeds {
+            music: 0x1234_5678,
+            speech: 0x9abc_def0,
+            contexts: 0x0fed_cba9,
+        };
+        let mut first = AudioSystem::new_with_seeds(seeds);
+        let mut second = AudioSystem::new_with_seeds(seeds);
+        let mut first_frames = Vec::new();
+        let mut second_frames = Vec::new();
+        for _ in 0..4 {
+            first.update(1.0 / 60.0);
+            second.update(1.0 / 60.0);
+            first.render_stereo(&mut first_frames);
+            second.render_stereo(&mut second_frames);
+        }
+        assert!(
+            !first_frames.is_empty(),
+            "the empty mastering path still renders blocks"
+        );
+        assert_eq!(
+            first_frames, second_frames,
+            "same seeds must render bit-identical frames"
+        );
+    }
 }
