@@ -19,12 +19,12 @@ use crate::game_stream::{
     AsyncReadPoll, AsyncReadRequest, InnerStreamBackend, ReadStage, StreamRegistrationContext,
 };
 use skate2_formats::{
-    mount::MountSet,
+    mount::{MountError, MountSet},
     stream::{AssetToc, CollectionMap, CollectionSpace},
 };
 use std::{
     collections::{HashMap, VecDeque},
-    fmt,
+    fmt, io,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Condvar, Mutex, MutexGuard},
     thread::{self, JoinHandle},
@@ -250,6 +250,11 @@ trait ReadSource: Send + Sync + 'static {
 enum SourceRead {
     Complete(Vec<u8>),
     Failed,
+    /// The source is not ready for this request — resident-span storage
+    /// whose bytes have not been fetched yet. The scheduler re-attempts the
+    /// operation on a later poll; a file-backed source never produces this
+    /// (files do not answer `WouldBlock`), so native behavior is unchanged.
+    Retry,
 }
 
 struct MountReadSource {
@@ -260,6 +265,11 @@ impl ReadSource for MountReadSource {
     fn read(&self, request: &AsyncReadRequest) -> SourceRead {
         match self.mounts.read_path(&request.path) {
             Ok(bytes) => SourceRead::Complete(bytes),
+            // A span miss: not an error, a not-yet. The host's miss handler
+            // has already kicked the fetch; the next poll re-reads.
+            Err(MountError::Io { source, .. }) if source.kind() == io::ErrorKind::WouldBlock => {
+                SourceRead::Retry
+            }
             Err(_) => SourceRead::Failed,
         }
     }
@@ -526,33 +536,62 @@ impl ReadScheduler {
     }
 
     /// Runs every admitted read on the calling thread until none is ready or
-    /// a fault is set: the worker's loop without the waiting.
+    /// a fault is set: the worker's loop without the waiting. An operation
+    /// that answers [`SourceRead::Retry`] returns to the ready front for
+    /// the next poll — one attempt per pass — so a not-ready source cannot
+    /// turn this loop into a spin.
     fn run_ready_inline(&self) {
+        let mut retried: Vec<u64> = Vec::new();
         loop {
-            let (id, request) = {
-                let mut state = match self.core.state.lock() {
-                    Ok(state) => state,
-                    Err(poisoned) => {
-                        let mut state = poisoned.into_inner();
-                        state.fault = Some(MountedReadSchedulerError::Poisoned);
-                        self.core.wake.notify_all();
-                        return;
+            let next = {
+                loop {
+                    let mut state = match self.core.state.lock() {
+                        Ok(state) => state,
+                        Err(poisoned) => {
+                            let mut state = poisoned.into_inner();
+                            state.fault = Some(MountedReadSchedulerError::Poisoned);
+                            self.core.wake.notify_all();
+                            break None;
+                        }
+                    };
+                    if state.shutting_down || state.fault.is_some() {
+                        break None;
                     }
-                };
-                if state.shutting_down || state.fault.is_some() {
-                    return;
+                    let Some(id) = state.ready.pop_front() else {
+                        break None;
+                    };
+                    if retried.contains(&id) {
+                        continue;
+                    }
+                    let Some(operation) = state.operations.get_mut(&id) else {
+                        continue;
+                    };
+                    operation.phase = OperationPhase::Reading;
+                    break Some((id, operation.request.clone()));
                 }
-                let Some(id) = state.ready.pop_front() else {
-                    return;
-                };
-                let Some(operation) = state.operations.get_mut(&id) else {
-                    continue;
-                };
-                operation.phase = OperationPhase::Reading;
-                (id, operation.request.clone())
+            };
+            let Some((id, request)) = next else {
+                break;
             };
             let outcome = catch_unwind(AssertUnwindSafe(|| self.core.source.read(&request)));
+            if matches!(outcome, Ok(SourceRead::Retry)) {
+                retried.push(id);
+            }
             record_outcome(&self.core, id, outcome);
+        }
+        if !retried.is_empty() {
+            let mut state = match self.core.state.lock() {
+                Ok(state) => state,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            // Exactly once each, at the front, in the order attempted:
+            // record_outcome already re-queued every retried id, so a copy
+            // still queued when the pass ended is dropped here first.
+            state.ready.retain(|queued| !retried.contains(queued));
+            for id in retried.iter().rev() {
+                state.ready.push_front(*id);
+            }
+            self.core.wake.notify_all();
         }
     }
 
@@ -688,31 +727,44 @@ fn record_outcome(core: &SchedulerCore, id: u64, outcome: thread::Result<SourceR
             return;
         }
     };
-    let (handle_alive, worker_panicked) = {
+    let (handle_alive, worker_panicked, retry) = {
         let Some(operation) = state.operations.get_mut(&id) else {
             state.fault = Some(MountedReadSchedulerError::MissingOperation);
             core.wake.notify_all();
             return;
         };
-        let worker_panicked = match outcome {
+        let (worker_panicked, retry) = match outcome {
             Ok(SourceRead::Complete(bytes)) => {
                 operation.phase = OperationPhase::Complete;
                 operation.bytes = Some(bytes);
-                false
+                (false, false)
             }
             Ok(SourceRead::Failed) => {
                 operation.phase = OperationPhase::Failed;
-                false
+                (false, false)
+            }
+            // Not ready: the operation returns to the ready front as if
+            // never attempted — FIFO preserved, the admission lease held,
+            // the next poll re-reads (by then the host's fetch has usually
+            // made the span resident). The yield guards a worker-mode
+            // against spinning; unreachable in production, where only the
+            // browser's inline mode sees Retry.
+            Ok(SourceRead::Retry) => {
+                operation.phase = OperationPhase::Admitted;
+                (false, true)
             }
             Err(_) => {
                 operation.phase = OperationPhase::Failed;
-                true
+                (true, false)
             }
         };
-        (operation.handle_alive, worker_panicked)
+        (operation.handle_alive, worker_panicked, retry)
     };
     if worker_panicked {
         state.fault = Some(MountedReadSchedulerError::WorkerPanicked);
+    }
+    if retry && handle_alive {
+        state.ready.push_front(id);
     }
     if !handle_alive {
         state.operations.remove(&id);
@@ -722,6 +774,9 @@ fn record_outcome(core: &SchedulerCore, id: u64, outcome: thread::Result<SourceR
         }
     }
     core.wake.notify_all();
+    if retry {
+        thread::yield_now();
+    }
 }
 
 /// Concrete mount-backed implementation of [`InnerStreamBackend`].
@@ -920,6 +975,8 @@ mod tests {
         Complete(Vec<u8>),
         Failed,
         Panic,
+        /// The source is not ready: the read answers `Retry`.
+        NotReady,
     }
 
     #[derive(Default)]
@@ -1030,6 +1087,7 @@ mod tests {
                 TestOutcome::Complete(bytes) => SourceRead::Complete(bytes),
                 TestOutcome::Failed => SourceRead::Failed,
                 TestOutcome::Panic => panic!("injected worker-source panic"),
+                TestOutcome::NotReady => SourceRead::Retry,
             }
         }
     }
@@ -1207,6 +1265,29 @@ mod tests {
         }
     }
 
+    /// Waits until no operation for `path` remains: the discard path a
+    /// worker records asynchronously after a dead handle's retry.
+    fn wait_for_no_operation(backend: &MountedStreamBackend<RecordingSink>, path: &str) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let core = &backend.scheduler.core;
+        let mut state = core.state.lock().unwrap();
+        while state
+            .operations
+            .values()
+            .any(|operation| operation.request.path == path)
+        {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .expect("timed out waiting for operation discard");
+            let (next, timeout) = core.wake.wait_timeout(state, remaining).unwrap();
+            state = next;
+            assert!(
+                !timeout.timed_out(),
+                "timed out waiting for {path} to be discarded"
+            );
+        }
+    }
+
     fn wait_for_scheduler_fault(
         backend: &MountedStreamBackend<RecordingSink>,
         expected: MountedReadSchedulerError,
@@ -1328,6 +1409,47 @@ mod tests {
         source.wait_for_started(4);
         assert!(source.maximum_active() <= MAX_ACTIVE_ASYNC_READS);
         source.release_all();
+    }
+
+    /// A `Retry` recorded after its handle dropped discards the operation
+    /// and releases its lease instead of re-queueing: no fault, no re-read,
+    /// and the scheduler keeps serving later reads. (Inline mode reads only
+    /// during a poll, with the handle live, so this is the workers' case.)
+    #[test]
+    fn retry_after_handle_drop_discards_cleanly() {
+        let source = Arc::new(TestSource::default());
+        source.block(&request(0).path);
+        source.set_outcome(&request(0).path, TestOutcome::NotReady);
+        let mut backend = backend(Arc::clone(&source));
+        let handle = backend.begin_read(request(0)).unwrap();
+        source.wait_for_path_started(&request(0).path);
+        drop(handle);
+        source.release(&request(0).path);
+        // The worker records the discard asynchronously; wait for it so the
+        // assertions below observe the settled scheduler, not the race.
+        wait_for_no_operation(&backend, &request(0).path);
+        let mut fresh = backend.begin_read(request(1)).unwrap();
+        assert!(matches!(
+            wait_for_terminal(&mut backend, &mut fresh),
+            AsyncReadPoll::Complete(_)
+        ));
+        assert_eq!(
+            backend
+                .scheduler
+                .core
+                .state
+                .lock()
+                .unwrap()
+                .operations
+                .len(),
+            1,
+            "the dropped retry is gone; only the fresh read remains"
+        );
+        assert_eq!(
+            source.started_paths(),
+            vec![request(0).path.clone(), request(1).path.clone()],
+            "the retry was not re-attempted after the discard"
+        );
     }
 
     #[test]
@@ -2208,6 +2330,90 @@ mod tests {
                 MountedReadSchedulerError::WorkerPanicked
             ))
         ));
+    }
+
+    /// A not-ready source keeps the poll `Pending`; once the span (here:
+    /// the outcome) is ready, the same read completes with the right bytes.
+    #[test]
+    fn inline_mode_retries_a_not_ready_source_to_completion() {
+        let source = Arc::new(TestSource::default());
+        source.set_outcome(&request(0).path, TestOutcome::NotReady);
+        let mut backend = inline_backend(Arc::clone(&source));
+        let mut handle = backend.begin_read(request(0)).unwrap();
+        for attempts in 1..=2 {
+            assert_eq!(
+                backend.poll_read(&mut handle).unwrap(),
+                AsyncReadPoll::Pending,
+                "a retry is not a completion and not a failure"
+            );
+            assert_eq!(
+                source.started_paths().len(),
+                attempts,
+                "each poll re-attempted the read exactly once"
+            );
+        }
+        source.set_outcome(
+            &request(0).path,
+            TestOutcome::Complete(b"resident!".to_vec()),
+        );
+        assert_eq!(
+            backend.poll_read(&mut handle).unwrap(),
+            AsyncReadPoll::Complete(b"resident!".to_vec())
+        );
+        assert_eq!(source.started_paths().len(), 3);
+    }
+
+    /// A retry holds its admission lease: while the not-ready read keeps
+    /// re-queueing, the fourth begin stays unadmitted, and only a real
+    /// completion's handle drop frees the lease it needs.
+    #[test]
+    fn inline_mode_retry_holds_the_admission_lease() {
+        let source = Arc::new(TestSource::default());
+        source.set_outcome(&request(0).path, TestOutcome::NotReady);
+        let mut backend = inline_backend(Arc::clone(&source));
+        let mut first = backend.begin_read(request(0)).unwrap();
+        let second = backend.begin_read(request(1)).unwrap();
+        let _third = backend.begin_read(request(2)).unwrap();
+        let mut fourth = backend.begin_read(request(3)).unwrap();
+        // One drain: request-0 retries, request-1 and request-2 complete.
+        assert_eq!(
+            backend.poll_read(&mut fourth).unwrap(),
+            AsyncReadPoll::Pending
+        );
+        assert_eq!(source.started_paths().len(), 3);
+        // Every later poll re-attempts only the retry; its lease never
+        // releases, so the fourth begin keeps waiting.
+        for _ in 0..2 {
+            assert_eq!(
+                backend.poll_read(&mut first).unwrap(),
+                AsyncReadPoll::Pending
+            );
+        }
+        assert_eq!(
+            source.started_paths().len(),
+            5,
+            "request-0 attempted three times, requests 1 and 2 once each"
+        );
+        assert_eq!(
+            backend.scheduler.core.state.lock().unwrap().active_leases,
+            MAX_ACTIVE_ASYNC_READS,
+            "the retrying operation still holds one of the three leases"
+        );
+        assert_eq!(
+            backend.poll_read(&mut fourth).unwrap(),
+            AsyncReadPoll::Pending,
+            "no retry freed a lease for the fourth begin"
+        );
+        drop(second);
+        assert!(matches!(
+            backend.poll_read(&mut fourth).unwrap(),
+            AsyncReadPoll::Complete(_)
+        ));
+        assert_eq!(
+            source.started_paths().len(),
+            8,
+            "the last two drains re-attempted the retry, then read request-3"
+        );
     }
 
     /// The inline scheduler through the same backend harness as the workers.
