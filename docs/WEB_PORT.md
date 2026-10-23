@@ -20,6 +20,7 @@ blocks a proper port.
 | Ranged streaming (asset step two) | done — entries read out of archives over HTTP `Range` (or `Blob::slice` for the picker), `RefPack` expanded, hashed sizes validated: `db.big`'s `skater.vlt` (851,632 bytes) read whole through ranged requests |
 | Vault attributes (asset step three) | done — the `.vlt`/`.bin` pair parsed in WASM: 675 types, 304 classes, 4,709 definitions, and `physics.default`'s layout read live — gravity `-9.8` (`0xc11ccccd`), the corpus test's pinned word |
 | The mount set (asset step four) | done — all twenty archive tables mounted in `RemoteMountSet` (18,274 entries), virtual-path reads routed across archives in mount order: `skater.vlt` via `db.big`, a shader XML via `render.big` |
+| Core streaming in the tab (milestone five) | done — the real `SelectedWorldStream` + `SelectedResidentStartup` boot runs single-threaded in the browser over prefetched spans (2.7 MiB, 12 entries) and reports `done — matches native`: 284 high collections, the corpus bounds bits, 21 plans, (21, 80) retained — identical to the native threaded oracle (`docs/WEB_PORT_M5_PLAN.md`) |
 | Real renderer / session / original assets in the browser | not started — see the blockers below |
 
 ## The port's road
@@ -33,7 +34,8 @@ counts:
 | 2 | Ranged streaming: entries out of archives, `RefPack`, hashed-size checks | done |
 | 3 | Vault attributes: parse the `.vlt` payloads the entries carry | done |
 | 4 | The async mount set: all twenty archives mounted in WASM | done |
-| 5 | Threads → cooperative futures for core's streaming | next |
+| 5 | Core streaming in the tab (single-threaded, prefetched) | done |
+| 5a | On-demand streaming: a resident-span miss becomes a pending read | next |
 | 6 | Audio (Web Audio + XMA) and networking (WebSockets) | |
 | 7 | The real renderer and booting a session in the tab | |
 
@@ -157,13 +159,18 @@ In rough dependency order, with the code that has to move:
 1. **Asset pipeline** (above) — `skate2-formats` readers and
    `skate2-core/src/streaming/` are `std::fs`, synchronous. Everything else on
    this list is secondary until a session can load a world.
-2. **Threads** — `std::thread` panics on wasm32-unknown-unknown.
-   `skate2-core/src/streaming/resident_collection_load_driver.rs` keeps a
-   `std::thread::JoinHandle` for prefetch and
-   `owned_resident_collection.rs` spawns workers; on the browser these need a
-   cooperative future (`wasm-bindgen-futures`) or a single-threaded load
-   path. (True threads via `SharedArrayBuffer` additionally require
-   COOP/COEP response headers from the server.)
+2. **Threads** — resolved for the streaming path by milestone five, not
+   by porting threads but by removing the need: a host policy
+   (`host_thread::disable_worker_threads`) makes the four optional workers
+   run inline, the read scheduler gained an inline mode with the same pool,
+   admission and FIFO, and the boot's bytes are prefetched to memory
+   (`MountedBig::with_storage` over `ResidentSpans`) because core reads
+   synchronously everywhere. A native corpus test pair pins threaded and
+   threadless boots to identical reports. Remaining `std::thread` users —
+   the animation job pool, the AI/scene/living-world loaders,
+   `finish_initial_load`'s sleep loop, remote skater, career saves, the RNG
+   seed and `diagnostics` clock — are session-boot (milestone seven)
+   concerns, off the streaming path.
 3. **Networking** — `skate2-net`'s client transport is `std::net` TCP; the
    browser offers WebSockets/WebTransport instead. Randomness is already
    solved (see the getrandom note above). The server stays native.
