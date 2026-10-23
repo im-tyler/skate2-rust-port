@@ -151,7 +151,7 @@ impl SelectedSimulationAssetServices {
         Ok(())
     }
 
-    #[cfg(test)]
+    /// The resident `(plans, wrappers)` counts; the boot probe reports them.
     pub(crate) fn retained_counts(&self) -> (usize, usize) {
         let fields = self.processed.lock().unwrap();
         (fields.plans.len(), fields.wrappers.len())

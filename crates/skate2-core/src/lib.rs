@@ -675,6 +675,8 @@ mod selected_simulation_asset_services;
 mod selected_terrain_startup;
 #[path = "session/streaming/selected_world_stream.rs"]
 mod selected_world_stream;
+#[path = "session/streaming/resident_boot_probe.rs"]
+pub mod resident_boot_probe;
 #[path = "physics/solver/drives/simulation_drive_jacobian.rs"]
 pub mod simulation_drive_jacobian;
 #[path = "physics/solver/drives/simulation_drive_pool.rs"]
