@@ -238,7 +238,16 @@ mod tests {
     #[test]
     fn later_unaligned_skater_replaces_speed_but_keeps_prior_skitch_flags() {
         let mut vehicle = vehicle_fixture();
-        let mut vault = graph(1, vec![]);
+        // The skitch radius key needs its class definition present, as real
+        // Vault data always pairs node and definition.
+        let mut vault = graph(
+            1,
+            vec![crate::attribute_runtime::tests::definition(
+                0x3346_6832_d817_8eaf,
+                4,
+                4,
+            )],
+        );
         collection(
             &mut vault,
             1,

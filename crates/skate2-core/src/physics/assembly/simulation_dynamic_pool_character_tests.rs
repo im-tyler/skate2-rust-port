@@ -49,7 +49,9 @@ fn source_living_world_body_view_keeps_entity_body_and_assembly_ids_distinct() {
             .try_raw_state(observation)
             .unwrap()
             & 15,
-        12
+        // Requested state 4 with the fixture's static flag set stores state 1
+        // (Part::AddToSimulation 0x82ae0ab8), then RegisterSpyTarget sets bit 3.
+        9
     );
     view.parts
         .try_remove_part_contact_spy(&mut backend, 0)
@@ -60,7 +62,8 @@ fn source_living_world_body_view_keeps_entity_body_and_assembly_ids_distinct() {
             .try_raw_state(observation)
             .unwrap()
             & 15,
-        4
+        // RemoveSpyTarget clears bit 3, leaving the stored state 1.
+        1
     );
     assert_eq!(pool.candidate(&body).unwrap().world_index(), assembly_id);
     let detached = pool.try_remove_serialized(&mut backend, &body).unwrap();

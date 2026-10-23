@@ -93,9 +93,12 @@ impl GrindingSource for Source {
         Ok(())
     }
     fn intent(&mut self, name: FastString36) -> Result<Option<f32>, Self::Error> {
+        // PackedFastString discards case at encode and decodes the canonical
+        // lowercase form, so the stub matches lowercase like the packed
+        // comparison the native performs.
         Ok(match name.decode().unwrap().as_str() {
-            "Crouch" => self.crouch_intent,
-            "GrindTwist" => self.twist_intent,
+            "crouch" => self.crouch_intent,
+            "grindtwist" => self.twist_intent,
             _ => return Err("intent"),
         })
     }
@@ -195,10 +198,10 @@ fn grind_facing_follows_the_cross_product_and_the_stance_xor() {
         ..Source::default()
     };
     create_grind_attributes_update(&mut s).unwrap();
-    assert_eq!(s.events[1], Event::Motion("Feeble".into(), 1.0));
+    assert_eq!(s.events[1], Event::Motion("feeble".into(), 1.0));
     assert_eq!(
         s.events[2],
-        Event::Motion("GrindFacingBackwards".into(), 1.0)
+        Event::Motion("grindfacingbackwards".into(), 1.0)
     );
     let mut s = Source {
         velocity: [0.0, 0.0, 1.0],
@@ -209,7 +212,7 @@ fn grind_facing_follows_the_cross_product_and_the_stance_xor() {
     create_grind_attributes_update(&mut s).unwrap();
     assert_eq!(
         s.events[2],
-        Event::Motion("GrindFacingForwards".into(), 1.0)
+        Event::Motion("grindfacingforwards".into(), 1.0)
     );
     // Mirrored and flipped cancel; an unordered y takes the ble branch.
     let mut s = Source {
@@ -222,7 +225,7 @@ fn grind_facing_follows_the_cross_product_and_the_stance_xor() {
     create_grind_attributes_update(&mut s).unwrap();
     assert_eq!(
         s.events[2],
-        Event::Motion("GrindFacingForwards".into(), 1.0)
+        Event::Motion("grindfacingforwards".into(), 1.0)
     );
 }
 

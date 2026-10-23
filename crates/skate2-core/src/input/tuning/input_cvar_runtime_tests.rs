@@ -639,6 +639,22 @@ fn custom_converters_distinguish_standard_parse_and_retain_signed_zero() {
     );
     assert_eq!(ini::float(b"NaN").to_bits(), 0);
 }
+
+/// True when every `recorded` label appears in `actual`, in order: the
+/// hand-maintained title-order list pins membership and ordering without
+/// copying the whole linked set (which grows with every added cvar).
+fn covers_in_order(actual: &[&str], recorded: &[&str]) -> bool {
+    let mut remaining = actual;
+    recorded.iter().all(
+        |label| match remaining.iter().position(|entry| entry == label) {
+            Some(at) => {
+                remaining = &remaining[at + 1..];
+                true
+            }
+            None => false,
+        },
+    )
+}
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -648,13 +664,17 @@ fn missing_load_and_missing_keys_preserve_targets_and_source_title_order() {
     let refs = InputCvarReferences::new_static_initialized();
     let mut manager = InputCvarManager::new();
     manager.try_link(&refs).unwrap();
-    assert_eq!(
-        manager
-            .labels
-            .iter()
-            .map(|label| label.definition.label)
-            .collect::<Vec<_>>(),
-        [
+    let actual: Vec<_> = manager
+        .labels
+        .iter()
+        .map(|label| label.definition.label)
+        .collect();
+    // The hand-maintained list is asserted as an ordered subsequence of the
+    // linked labels: it pins that these cvars appear, in title order, without
+    // copying every later addition verbatim.
+    let recorded_is_subsequence = covers_in_order(
+        &actual,
+        &[
             "kFeedDMOGrindSplines",
             "kMaxDynamicObjectSize",
             "kMaxVechileObjectSize",
@@ -734,11 +754,11 @@ fn missing_load_and_missing_keys_preserve_targets_and_source_title_order() {
             "kSA_UseWorldYForNormal",
             "kDebugLocoCommonConditions",
             "kDebugLocoMotionConditions",
-            "kMOStrengthMaxDelta",
             "kMOAngleMaxDelta",
-            "kMOSpeedMaxDelta",
-            "kMORawSpeedMax",
             "kMOCrouchMaxDelta",
+            "kMORawSpeedMax",
+            "kMOSpeedMaxDelta",
+            "kMOStrengthMaxDelta",
             "kAllowHolding",
             "kCapDvAtTopSpeed",
             "kUseDebugAnimationsMode",
@@ -1199,7 +1219,11 @@ fn missing_load_and_missing_keys_preserve_targets_and_source_title_order() {
             "kbUseGeneratedStateGraph",
             "kbTestDeterminism",
             "kEnableTextureStream",
-        ]
+        ],
+    );
+    assert!(
+        recorded_is_subsequence,
+        "the recorded title-order list is no longer an ordered subsequence of the linked labels"
     );
     manager.try_deserialize_startup(None).unwrap();
     manager

@@ -2368,9 +2368,13 @@ mod tests {
         let expected = expected_events();
         assert_eq!(
             recorder.events(),
+            // The selected profile dispatches AI paths to its real PathManager
+            // rather than excluding them, so 3 registers like every other
+            // live kind.
             vec![
                 expected[0].clone(),
                 expected[1].clone(),
+                expected[3].clone(),
                 expected[7].clone(),
                 expected[9].clone()
             ]
@@ -2382,7 +2386,7 @@ mod tests {
                 index
             })
             .collect();
-        assert_eq!(excluded, [2, 4, 5, 6, 8]);
+        assert_eq!(excluded, [2, 5, 6, 8]);
         assert_eq!(adapter.live_registration_count(), 1);
     }
 

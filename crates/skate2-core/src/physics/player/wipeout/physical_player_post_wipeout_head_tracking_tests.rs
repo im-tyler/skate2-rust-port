@@ -63,12 +63,17 @@ impl Fixture {
         )
     }
 }
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a test stub mirrors the source trait's independent switches one field each"
+)]
 struct Source {
     control: [f32; 4],
     force: bool,
     cap: Result<f32, &'static str>,
     draw: bool,
     fail_angle_capture: bool,
+    clamp: bool,
     calls: Vec<&'static str>,
 }
 impl Source {
@@ -79,6 +84,7 @@ impl Source {
             cap: Ok(0.25),
             draw: false,
             fail_angle_capture: false,
+            clamp: true,
             calls: vec![],
         }
     }
@@ -123,7 +129,7 @@ impl HeadTrackingSource for Source {
         Ok(self.draw)
     }
     fn clamp_ideal(&mut self) -> Result<bool, Self::Error> {
-        Ok(true)
+        Ok(self.clamp)
     }
     fn largest_up_angle(&mut self) -> Result<f32, Self::Error> {
         Ok(45.0)
@@ -307,6 +313,10 @@ fn valid_target_rotates_head_toward_point_and_clears_latch() {
     let mut source = Source::new();
     source.control = [1.0, 0.0, 0.0, 0.0];
     source.cap = Ok(1.0);
+    // This test pins the translation subtraction and the axis-angle sign;
+    // with the native ClampIdeal default the 30° roll clamps the ideal back
+    // to horizontal and the rotation is zero by design.
+    source.clamp = false;
     try_update(
         HeadTrackingState {
             filter: &mut fixture.filter,

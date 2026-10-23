@@ -135,8 +135,11 @@ mod tests {
         for (id, x) in [(31, 5.), (32, 2.), (33, 30.)] {
             let mut vehicle = vehicle_fixture();
             vehicle.id = id;
-            vehicle.core.transform = CAR;
-            vehicle.core.transform[3] = [x, 0., 0., 1.];
+            // Only the native SetTransform writes mPositionXZ (the KD key);
+            // assigning the field directly leaves every vehicle at [0, 0].
+            let mut transform = CAR;
+            transform[3] = [x, 0., 0., 1.];
+            vehicle.core.set_transform::<()>(transform).unwrap();
             entities.add(id, vehicle).unwrap();
         }
         service.grind_vehicle_entities = Some(entities);

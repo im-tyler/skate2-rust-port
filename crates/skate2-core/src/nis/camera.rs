@@ -322,10 +322,10 @@ mod tests {
         assert_eq!(spaces.avatars[0], spaces.anchor);
         assert_eq!(spaces.avatars[1], None);
         let replay = [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 10., 20., 30., 1.];
-        let spaces = ice_spaces(&SceneFrame::default(), &CameraAnchors { replay: Some(replay), hips: None, ..CameraAnchors::default() });
-        assert_eq!(spaces.avatars[1], Some([30.0, 10.0, 20.0]));
-        assert_eq!(spaces.avatars[2], Some([33.0, 10.0, 20.0]));
-        assert!(spaces.avatar_orientations[1].is_some() && spaces.avatar_orientations[3].is_none());
+        let replay_spaces = ice_spaces(&SceneFrame::default(), &CameraAnchors { replay: Some(replay), hips: None, ..CameraAnchors::default() });
+        assert_eq!(replay_spaces.avatars[1], Some([30.0, 10.0, 20.0]));
+        assert_eq!(replay_spaces.avatars[2], Some([33.0, 10.0, 20.0]));
+        assert!(replay_spaces.avatar_orientations[1].is_some() && replay_spaces.avatar_orientations[3].is_none());
         assert_eq!((spaces.avatars[2], spaces.avatars[3]), (Some([6.0, 4.0, 5.0]), Some([6.0, 4.0, 5.0])));
         // Entity 0 at zero height, then the entities: one without a render
         // entity unresolved, one past the last at the origin.
