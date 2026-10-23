@@ -250,6 +250,123 @@ mod tests {
 #[cfg(target_arch = "wasm32")]
 const MANIFEST: &str = include_str!("../boot-manifest.tsv");
 
+/// The native oracle for the full on-demand flow, recorded once from the
+/// phase (d) corpus run (the threaded `EXPECTED` in
+/// `crates/skate2-core/tests/common/mod.rs`): the bootstrap fields plus the
+/// sibling district's on-demand load through the blocking miss handler.
+#[cfg(target_arch = "wasm32")]
+const NATIVE_ONDEMAND: ResidentBootReport = ResidentBootReport {
+    high_collections: 284,
+    bounds_min: [3_311_468_544, 3_275_851_331, 3_307_372_544],
+    bounds_max: [1_159_069_696, 1_139_775_930, 1_157_234_688],
+    resident_plans: 21,
+    retained_counts: (21, 80),
+    second_plans: 7,
+    second_retained: (28, 124),
+};
+
+/// The panel's on-demand counters, shared with the miss handlers' fetches.
+#[cfg(target_arch = "wasm32")]
+#[derive(Default)]
+struct OnDemandStats {
+    spans: std::sync::atomic::AtomicU32,
+    bytes: std::sync::atomic::AtomicU64,
+}
+
+/// One on-demand span fetch a miss handler requested: the archive's data
+/// file, the stored range, and the span set it belongs in. Every field is
+/// thread-safe data — the byte source (which is not) stays on the event
+/// loop side of the queue.
+#[cfg(target_arch = "wasm32")]
+struct PendingSpanFetch {
+    data_path: String,
+    range: std::ops::Range<u64>,
+    spans: Arc<ResidentSpans>,
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    /// Miss-handler requests, drained between the probe's polling bursts.
+    /// wasm is single-threaded; the handler bound stays `Send + Sync`
+    /// because the queue is reached through this thread-local, never
+    /// captured.
+    static PENDING_SPANS: std::cell::RefCell<Vec<PendingSpanFetch>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// Spans already requested, by `(data path, start)`, so a burst of
+    /// repeated misses does not become a burst of duplicate fetches. An
+    /// entry leaves only on failure, so a failed fetch is retried by the
+    /// next miss; once landed, the span is resident and cannot miss again.
+    static REQUESTED_SPANS: std::cell::RefCell<std::collections::HashSet<(String, u64)>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// The async miss handler (`docs/WEB_PORT_M5A_PLAN.md`, phase 5): a miss
+/// queues one ranged fetch of the stored span containing it — nothing is
+/// read here, and the span lock the miss was called from stays released.
+/// The queue is drained on the event loop between polling bursts.
+#[cfg(target_arch = "wasm32")]
+fn on_demand_handler(
+    data_path: String,
+    entry_ranges: Vec<std::ops::Range<u64>>,
+    spans_slot: Arc<std::sync::OnceLock<Arc<ResidentSpans>>>,
+) -> Box<dyn Fn(u64, usize) + Send + Sync> {
+    Box::new(move |offset, _length| {
+        let Some(spans) = spans_slot.get() else {
+            return;
+        };
+        let Some(range) = entry_ranges.iter().find(|range| range.contains(&offset)) else {
+            return;
+        };
+        let request = (data_path.clone(), range.start);
+        let enqueue = REQUESTED_SPANS.with(|requested| requested.borrow_mut().insert(request));
+        if !enqueue {
+            return;
+        }
+        PENDING_SPANS.with(|pending| {
+            pending.borrow_mut().push(PendingSpanFetch {
+                data_path: data_path.clone(),
+                range: range.clone(),
+                spans: Arc::clone(spans),
+            })
+        });
+    })
+}
+
+/// Drains the miss handlers' queue on the event loop: one ranged fetch per
+/// span, inserted resident, counted for the panel. A failed fetch releases
+/// its request slot so a later miss can try again.
+#[cfg(target_arch = "wasm32")]
+async fn drain_pending_spans<S: crate::game_files::ByteSource + ?Sized>(
+    source: &S,
+    stats: &OnDemandStats,
+) {
+    use std::sync::atomic::Ordering;
+    let pending = PENDING_SPANS.with(|pending| std::mem::take(&mut *pending.borrow_mut()));
+    for fetch in pending {
+        match source
+            .read_range(&fetch.data_path, fetch.range.clone())
+            .await
+        {
+            Ok(bytes) => {
+                stats.bytes.fetch_add(
+                    u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
+                stats.spans.fetch_add(1, Ordering::Relaxed);
+                fetch.spans.insert(fetch.range.start, bytes);
+            }
+            Err(_) => {
+                REQUESTED_SPANS.with(|requested| {
+                    requested
+                        .borrow_mut()
+                        .remove(&(fetch.data_path.clone(), fetch.range.start));
+                });
+            }
+        }
+        yield_to_event_loop().await;
+    }
+}
+
 /// Runs the boot probe in the tab and returns the panel's final line;
 /// progress lines land in `progress`.
 #[cfg(target_arch = "wasm32")]
@@ -264,9 +381,10 @@ pub(crate) async fn run_boot_probe<S: crate::game_files::ByteSource + ?Sized>(
     // The browser's configuration, before anything core touches a thread.
     skate2_core::host_thread::disable_worker_threads();
     let remote = crate::game_files::RemoteMountSet::open_all(source).await;
-    let (spans, resident_bytes, fetch_seconds) =
+    let (spans, stats, resident_bytes, fetch_seconds) =
         fetch_boot_spans(source, &remote, &manifest, progress).await;
-    let (report, boot_seconds, longest_poll) = drive_boot_probe(&remote, &spans, progress).await;
+    let (bootstrap, report, boot_seconds, longest_poll) =
+        drive_boot_probe(&remote, &spans, source, &stats, progress).await;
 
     let misses: Vec<String> = spans
         .values()
@@ -278,42 +396,74 @@ pub(crate) async fn run_boot_probe<S: crate::game_files::ByteSource + ?Sized>(
     } else {
         misses.join(", ")
     };
-    let verdict = if report == manifest.report {
+    let verdict = if report == NATIVE_ONDEMAND && bootstrap == manifest.report {
         "done — matches native".to_owned()
-    } else {
+    } else if report == NATIVE_ONDEMAND {
         format!(
-            "MISMATCH\n  manifest: {:?}\n  this run:  {report:?}",
+            "MISMATCH (bootstrap)\n  manifest:  {:?}\n  bootstrap: {bootstrap:?}",
             manifest.report
         )
+    } else {
+        format!(
+            "MISMATCH\n  native:   {:?}\n  this run: {report:?}",
+            NATIVE_ONDEMAND
+        )
     };
+    use std::sync::atomic::Ordering;
     format!(
-        "boot probe: {verdict}; spans {} in {:.1}s, boot {:.1}s, longest poll {:.1} ms, {misses_text}",
+        "boot probe: {verdict}; spans {} in {:.1}s, boot {:.1}s, longest poll {:.1} ms, {misses_text}, on-demand: {} spans ({}) fetched",
         format_mib(resident_bytes),
         fetch_seconds,
         boot_seconds,
         longest_poll * 1000.0,
+        stats.spans.load(Ordering::Relaxed),
+        format_mib(stats.bytes.load(Ordering::Relaxed)),
     )
 }
 
 /// Fetches every manifest entry's stored span over ranges: the bytes core
-/// will read, resident before core asks. Progress lands in `progress`
-/// between fetches; the tab stays responsive.
+/// will read, resident before core asks. Every archive's span set is created
+/// here with the on-demand miss handler armed, so a read the manifest does
+/// not name still loads — by fetching, not by failing. Progress lands in
+/// `progress` between fetches; the tab stays responsive.
 #[cfg(target_arch = "wasm32")]
 async fn fetch_boot_spans<S: crate::game_files::ByteSource + ?Sized>(
     source: &S,
     remote: &crate::game_files::RemoteMountSet,
     manifest: &BootManifest,
     progress: &web_sys::Element,
-) -> (Spans, u64, f64) {
+) -> (Spans, OnDemandStats, u64, f64) {
     let mut spans = Spans::new();
     let mut resident_bytes = 0_u64;
     let fetch_start = seconds_now();
+    // Every archive's span set, armed with its on-demand handler before any
+    // read can miss. The handler and the set reference each other; the Arc
+    // is published to the handler's slot right after construction.
+    for (mount_path, archive) in remote.archives() {
+        let entry_ranges: Vec<std::ops::Range<u64>> = archive
+            .archive
+            .entries
+            .iter()
+            .map(|entry| entry.offset..entry.offset + u64::from(entry.stored_size))
+            .collect();
+        let spans_slot = Arc::new(std::sync::OnceLock::new());
+        let archive_spans =
+            ResidentSpans::new((*mount_path).to_owned()).with_miss_handler(on_demand_handler(
+                archive.data_path.clone(),
+                entry_ranges,
+                Arc::clone(&spans_slot),
+            ));
+        let archive_spans = Arc::new(archive_spans);
+        let _ = spans_slot.set(Arc::clone(&archive_spans));
+        spans.insert(mount_path, archive_spans);
+    }
     for (index, entry) in manifest.entries.iter().enumerate() {
         let normalized = entry.mount_path.replace('\\', "/");
-        let Some(&(mount_path, ref archive)) = remote
+        let Some((mount_path, archive)) = remote
             .archives()
             .iter()
             .find(|(path, _)| *path == normalized)
+            .map(|(path, archive)| (*path, archive))
         else {
             note_progress(
                 progress,
@@ -358,8 +508,8 @@ async fn fetch_boot_spans<S: crate::game_files::ByteSource + ?Sized>(
         };
         resident_bytes += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         spans
-            .entry(mount_path)
-            .or_insert_with(|| Arc::new(ResidentSpans::new(mount_path.to_owned())))
+            .get(mount_path)
+            .expect("every archive's spans were armed above")
             .insert(table_entry.offset, bytes);
         note_progress(
             progress,
@@ -371,30 +521,39 @@ async fn fetch_boot_spans<S: crate::game_files::ByteSource + ?Sized>(
         );
         yield_to_event_loop().await;
     }
-    (spans, resident_bytes, seconds_now() - fetch_start)
+    (
+        spans,
+        OnDemandStats::default(),
+        resident_bytes,
+        seconds_now() - fetch_start,
+    )
 }
 
 /// Builds core's mount set over the spans and drives the probe cooperatively
 /// — 8 ms polling bursts, then a `setTimeout 0` yield so the tab breathes —
-/// until its report is ready.
+/// first to the bootstrap `Done`, then (after `request_more`) through the
+/// second district's on-demand misses to the extended `Done`. Between
+/// bursts the miss handlers' queued fetches drain, so a not-ready read
+/// becomes resident and the next burst's retry succeeds.
 #[cfg(target_arch = "wasm32")]
-async fn drive_boot_probe(
+async fn drive_boot_probe<S: crate::game_files::ByteSource + ?Sized>(
     remote: &crate::game_files::RemoteMountSet,
     spans: &Spans,
+    source: &S,
+    stats: &OnDemandStats,
     progress: &web_sys::Element,
-) -> (ResidentBootReport, f64, f64) {
+) -> (ResidentBootReport, ResidentBootReport, f64, f64) {
     use skate2_formats::mount::{ArchiveRanges, MountSet, MountedBig};
     let mut mounts = MountSet::new();
     for (mount_path, archive) in remote.archives() {
-        let archive_spans = spans.get(mount_path).map_or_else(
-            || Arc::new(ResidentSpans::new((*mount_path).to_owned())),
-            Arc::clone,
-        );
+        let archive_spans = spans
+            .get(mount_path)
+            .expect("every archive's spans were armed in the prefetch");
         mounts.push(MountedBig::with_storage(
             std::path::PathBuf::from(mount_path.replace('/', "\\")),
             std::path::PathBuf::from(mount_path.replace(".big", ".bh")),
             archive.archive.clone(),
-            archive_spans as Arc<dyn ArchiveRanges>,
+            Arc::clone(archive_spans) as Arc<dyn ArchiveRanges>,
         ));
     }
     let mut probe = match skate2_core::resident_boot_probe::ResidentBootProbe::new(Arc::new(mounts))
@@ -407,15 +566,17 @@ async fn drive_boot_probe(
     };
     let boot_start = seconds_now();
     let mut longest_poll = 0_f64;
-    let report = loop {
+    let mut second_requested = false;
+    let (mut bootstrap, mut report) = (zeroed_report(), zeroed_report());
+    loop {
         let burst_start = seconds_now();
         let mut done = None;
         loop {
             let poll_start = seconds_now();
             match probe.poll() {
-                Ok(skate2_core::resident_boot_probe::ResidentBootPoll::Done(report)) => {
+                Ok(skate2_core::resident_boot_probe::ResidentBootPoll::Done(polled)) => {
                     longest_poll = longest_poll.max(seconds_now() - poll_start);
-                    done = Some(report);
+                    done = Some(polled);
                     break;
                 }
                 Ok(_) => {
@@ -426,13 +587,30 @@ async fn drive_boot_probe(
                 }
                 Err(problem) => {
                     note_progress(progress, &format!("boot probe: poll failed: {problem}"));
-                    return placeholder_report();
+                    return (bootstrap, report, seconds_now() - boot_start, longest_poll);
                 }
             }
         }
-        if let Some(report) = done {
-            break report;
+        if let Some(polled) = done {
+            if !second_requested {
+                // The bootstrap closed: its report is the manifest's.
+                bootstrap = polled.clone();
+                report = polled;
+                second_requested = true;
+                if let Err(problem) = probe.request_more() {
+                    note_progress(
+                        progress,
+                        &format!("boot probe: request_more failed: {problem}"),
+                    );
+                    return (bootstrap, report, seconds_now() - boot_start, longest_poll);
+                }
+            } else {
+                // The second district loaded — on demand, through misses.
+                report = polled;
+                break;
+            }
         }
+        drain_pending_spans(source, stats).await;
         let (stream_polls, resident_polls) = probe.polls();
         note_progress(
             progress,
@@ -442,8 +620,8 @@ async fn drive_boot_probe(
             ),
         );
         yield_to_event_loop().await;
-    };
-    (report, seconds_now() - boot_start, longest_poll)
+    }
+    (bootstrap, report, seconds_now() - boot_start, longest_poll)
 }
 
 /// One progress line, when the element exists.
@@ -455,20 +633,22 @@ fn note_progress(progress: &web_sys::Element, text: &str) {
 /// A zeroed report for a failed drive; the verdict line reports the failure
 /// cause already written to the progress line.
 #[cfg(target_arch = "wasm32")]
-fn placeholder_report() -> (ResidentBootReport, f64, f64) {
-    (
-        ResidentBootReport {
-            high_collections: 0,
-            bounds_min: [0; 3],
-            bounds_max: [0; 3],
-            resident_plans: 0,
-            retained_counts: (0, 0),
-            second_plans: 0,
-            second_retained: (0, 0),
-        },
-        0.0,
-        0.0,
-    )
+fn zeroed_report() -> ResidentBootReport {
+    ResidentBootReport {
+        high_collections: 0,
+        bounds_min: [0; 3],
+        bounds_max: [0; 3],
+        resident_plans: 0,
+        retained_counts: (0, 0),
+        second_plans: 0,
+        second_retained: (0, 0),
+    }
+}
+
+/// The failed drive's answer: zeroed bootstrap and extended reports.
+#[cfg(target_arch = "wasm32")]
+fn placeholder_report() -> (ResidentBootReport, ResidentBootReport, f64, f64) {
+    (zeroed_report(), zeroed_report(), 0.0, 0.0)
 }
 
 /// The per-archive resident spans, by mount path.
