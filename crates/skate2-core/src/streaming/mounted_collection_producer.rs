@@ -14,7 +14,7 @@ use skate2_formats::mount::{LogicalEntryRange, LogicalEntryStorage, MountError, 
 use std::{
     collections::VecDeque,
     error::Error,
-    fmt,
+    fmt, io,
     ops::Range,
     sync::{Arc, Mutex, MutexGuard, Weak, mpsc},
 };
@@ -46,6 +46,24 @@ impl CollectionLogicalRangeSource for MountSet {
     fn read_range(&self, path: &str, range: Range<u64>) -> Result<LogicalEntryRange, Self::Error> {
         self.read_path_range(path, range)
     }
+}
+
+/// A source error whose chain carries a `WouldBlock` I/O error: a
+/// resident-span miss. Not a failure — the read is not ready *yet*, and the
+/// host's miss handler has already kicked the fetch that will make it ready.
+/// File-backed sources never answer it, so native behavior is unchanged.
+fn source_not_ready<E>(error: &E) -> bool
+where
+    E: Error + Send + Sync + 'static,
+{
+    let mut current: Option<&(dyn Error + 'static)> = Some(error);
+    while let Some(error) = current {
+        if let Some(io_error) = error.downcast_ref::<io::Error>() {
+            return io_error.kind() == io::ErrorKind::WouldBlock;
+        }
+        current = error.source();
+    }
+    false
 }
 
 /// Raw-parser surface required by the byte producer.
@@ -619,7 +637,10 @@ where
     ///
     /// Source reads and parser callbacks occur with no shared stream lock held.
     /// A first source, parser, range-contract, or EOF failure is retained and
-    /// returned unchanged by every later poll.
+    /// returned unchanged by every later poll. A source read that answers
+    /// `WouldBlock` (a resident-span miss) is none of these: the poll reports
+    /// [`MountedCollectionProducerPoll::Reading`] without latching, and the
+    /// next poll re-attempts the same range.
     ///
     /// # Errors
     ///
@@ -645,8 +666,8 @@ where
             };
             Some(stage)
         } else {
-            if self.logical_len.is_none() {
-                self.initialize_entry()?;
+            if self.logical_len.is_none() && !self.initialize_entry()? {
+                return Ok(MountedCollectionProducerPoll::Reading);
             }
             None
         };
@@ -675,7 +696,10 @@ where
                     "the stream reader read no stage before the entry's end",
                 )));
             }
-            None => self.read_stage(logical_len)?,
+            None => match self.read_stage(logical_len)? {
+                Some(read) => read,
+                None => return Ok(MountedCollectionProducerPoll::Reading),
+            },
         };
         let bytes_read = read.bytes.len();
         let storage = read.storage;
@@ -729,6 +753,14 @@ where
             }
             Ok(Err(error)) => {
                 self.reading = None;
+                if source_not_ready(&error) {
+                    // The stream reader's stage answered "not ready": re-queue
+                    // the same stage (its range is recomputed from the
+                    // cursor) and report Reading — nothing latched, nothing
+                    // advanced.
+                    self.queue_background_stage(self.logical_len);
+                    return Ok(None);
+                }
                 return Err(self.latch(MountedCollectionProducerError::Source(Arc::new(error))));
             }
             Ok(Ok(stage)) => stage,
@@ -754,19 +786,23 @@ where
     fn read_stage(
         &mut self,
         logical_len: u64,
-    ) -> MountedCollectionProducerResult<(Range<u64>, LogicalEntryRange), R::Error> {
+    ) -> MountedCollectionProducerResult<Option<(Range<u64>, LogicalEntryRange)>, R::Error>
+    {
         let remaining = logical_len - self.read_cursor;
         let amount = remaining.min(COLLECTION_STREAM_READ_SIZE);
         let end = self.read_cursor + amount;
         let range = self.read_cursor..end;
         let read = match self.source.read_range(&self.path, range.clone()) {
             Ok(read) => read,
+            // Not ready: nothing latched, nothing advanced; the next poll
+            // recomputes this same range from the cursor.
+            Err(error) if source_not_ready(&error) => return Ok(None),
             Err(error) => {
                 return Err(self.latch(MountedCollectionProducerError::Source(Arc::new(error))));
             }
         };
         self.validate_read(&range, &read)?;
-        Ok((range, read))
+        Ok(Some((range, read)))
     }
 
     fn append_stage(&mut self, mut bytes: Vec<u8>, end: u64) {
@@ -881,14 +917,17 @@ where
         Ok((parser_callbacks, chunks_published))
     }
 
-    fn initialize_entry(&mut self) -> MountedCollectionProducerResult<(), R::Error> {
+    fn initialize_entry(&mut self) -> MountedCollectionProducerResult<bool, R::Error> {
         let read = match self.source.read_range(&self.path, 0..0) {
             Ok(read) => read,
+            // Not ready: nothing latched; the next poll probes again.
+            Err(error) if source_not_ready(&error) => return Ok(false),
             Err(error) => {
                 return Err(self.latch(MountedCollectionProducerError::Source(Arc::new(error))));
             }
         };
-        self.take_probe(&read)
+        self.take_probe(&read)?;
+        Ok(true)
     }
 
     /// The length probe: no bytes, and the payload inside the entry.
@@ -998,18 +1037,10 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 mod tests {
     use super::*;
     use crate::collection_load_pump::{CollectionDecompressionSubmission, CollectionStreamFormat};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    struct SourceError(&'static str);
-
-    impl fmt::Display for SourceError {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str(self.0)
-        }
-    }
-
-    impl Error for SourceError {}
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::{Duration, Instant},
+    };
 
     #[derive(Debug)]
     struct MemorySource {
@@ -1019,6 +1050,9 @@ mod tests {
         storage: LogicalEntryStorage,
         calls: Mutex<Vec<Range<u64>>>,
         fail_at_call: Option<usize>,
+        /// Calls whose index falls in this window answer `WouldBlock`: a
+        /// resident-span miss, not a failure.
+        not_ready_calls: Option<Range<usize>>,
         wrong_len_at_call: Option<usize>,
         changed_storage_at_call: Option<usize>,
         changed_logical_len_at_call: Option<usize>,
@@ -1033,6 +1067,7 @@ mod tests {
                 storage: LogicalEntryStorage::Raw,
                 calls: Mutex::new(Vec::new()),
                 fail_at_call: None,
+                not_ready_calls: None,
                 wrong_len_at_call: None,
                 changed_storage_at_call: None,
                 changed_logical_len_at_call: None,
@@ -1045,7 +1080,7 @@ mod tests {
     }
 
     impl CollectionLogicalRangeSource for MemorySource {
-        type Error = SourceError;
+        type Error = io::Error;
 
         fn read_range(
             &self,
@@ -1057,7 +1092,12 @@ mod tests {
             calls.push(range.clone());
             drop(calls);
             if self.fail_at_call == Some(call) {
-                return Err(SourceError("injected read failure"));
+                return Err(io::Error::other("injected read failure"));
+            }
+            if let Some(blocked) = &self.not_ready_calls {
+                if blocked.contains(&call) {
+                    return Err(io::Error::from(io::ErrorKind::WouldBlock));
+                }
             }
             let mut bytes = if range.is_empty() {
                 Vec::new()
@@ -1520,6 +1560,103 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second));
         assert!(matches!(&*first, MountedCollectionProducerError::Parser(_)));
         assert!(parser.stream().snapshot().producer_failed);
+    }
+
+    /// A not-ready length probe (the entry's `0..0` read) answers `Reading`
+    /// without latching, however often it repeats; the load completes once
+    /// the source stops blocking.
+    #[test]
+    fn not_ready_probe_polls_reading_without_latching_until_ready() {
+        let source = Arc::new(MemorySource {
+            not_ready_calls: Some(0..2),
+            ..MemorySource::new(0, record(3, 128, 0x77))
+        });
+        let (mut producer, stream) =
+            MountedCollectionProducer::new(Arc::clone(&source), "probe.xsf", 0, 9).unwrap();
+        let mut parser = pump(stream, 9, 1);
+        assert_eq!(
+            producer.poll_parser(&mut parser).unwrap(),
+            MountedCollectionProducerPoll::Reading
+        );
+        assert_eq!(
+            producer.poll_parser(&mut parser).unwrap(),
+            MountedCollectionProducerPoll::Reading
+        );
+        assert_eq!(source.calls(), vec![0..0, 0..0]);
+        assert!(producer.terminal_error().is_none());
+        let MountedCollectionProducerPoll::Stage(stage) =
+            producer.poll_parser(&mut parser).unwrap()
+        else {
+            panic!("the read completes once the source stops blocking");
+        };
+        assert!(stage.finished);
+        assert_eq!(source.calls().last().cloned(), Some(0..128));
+    }
+
+    /// A not-ready stage read answers `Reading` without latching, and the
+    /// next poll recomputes the same range from the cursor.
+    #[test]
+    fn not_ready_stage_recomputes_the_same_range_without_latching() {
+        let source = Arc::new(MemorySource {
+            not_ready_calls: Some(1..3),
+            ..MemorySource::new(0, record(4, 128, 0x88))
+        });
+        let (mut producer, stream) =
+            MountedCollectionProducer::new(Arc::clone(&source), "stage.xsf", 0, 10).unwrap();
+        let mut parser = pump(stream, 10, 1);
+        assert_eq!(
+            producer.poll_parser(&mut parser).unwrap(),
+            MountedCollectionProducerPoll::Reading
+        );
+        assert_eq!(
+            producer.poll_parser(&mut parser).unwrap(),
+            MountedCollectionProducerPoll::Reading
+        );
+        assert_eq!(
+            source.calls(),
+            vec![0..0, 0..128, 0..128],
+            "the probe ran once; each retry recomputed the same stage range"
+        );
+        assert!(producer.terminal_error().is_none());
+        assert!(matches!(
+            producer.poll_parser(&mut parser).unwrap(),
+            MountedCollectionProducerPoll::Stage(stage) if stage.finished
+        ));
+    }
+
+    /// The stream reader's not-ready stage re-queues the same stage and keeps
+    /// reporting `Reading`; the background load completes without latching.
+    #[test]
+    fn not_ready_background_stage_requeues_until_ready() {
+        let source = Arc::new(MemorySource {
+            not_ready_calls: Some(0..2),
+            ..MemorySource::new(0, record(5, 128, 0x99))
+        });
+        let (mut producer, stream) =
+            MountedCollectionProducer::new(Arc::clone(&source), "background.xsf", 0, 11).unwrap();
+        producer.background = true;
+        let mut parser = pump(stream, 11, 1);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match producer.poll_parser(&mut parser).unwrap() {
+                MountedCollectionProducerPoll::Reading => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for the background stage to become ready"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                MountedCollectionProducerPoll::Stage(stage) => {
+                    assert!(stage.finished);
+                    break;
+                }
+                MountedCollectionProducerPoll::Finished => {
+                    panic!("the producer finished without reading a stage");
+                }
+            }
+        }
+        assert!(producer.terminal_error().is_none());
+        assert!(source.calls().iter().any(|range| range == &(0..128)));
     }
 
     #[test]
