@@ -489,6 +489,11 @@ pub(crate) struct RemoteMountSet {
 }
 
 impl RemoteMountSet {
+    /// The mounted archives, in mount order, for the boot probe's span
+    /// fetches and `with_storage` mounts.
+    pub(crate) fn archives(&self) -> &[(&'static str, RemoteArchive)] {
+        &self.mounted
+    }
     /// Mounts every expected archive's table; an archive that cannot open
     /// is recorded in [`Self::failures`] and skipped, as a dump missing one
     /// file should still read the other nineteen.

@@ -7,8 +7,8 @@
   <!-- The cdylib (lib.rs `start`), not the desktop-only debug binary. -->
   
 <script type="module">
-import init, * as bindings from '/skate2-web-67c21f93ca43c6ba.js';
-const wasm = await init({ module_or_path: '/skate2-web-4333416a30185cbd_bg.wasm' });
+import init, * as bindings from '/skate2-web-c88ac5883e6785f4.js';
+const wasm = await init({ module_or_path: '/skate2-web-ba668a03e4c6cfe7_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -115,6 +115,27 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
       z-index: 5;
     }
     #pick-folder:hover { border-color: var(--accent); }
+    #boot-probe {
+      position: absolute;
+      bottom: 54px;
+      right: 12px;
+      background: var(--panel);
+      border: 1px solid #2a2f38;
+      border-radius: 10px;
+      color: var(--ink);
+      font: inherit;
+      font-size: 13px;
+      padding: 8px 14px;
+      cursor: pointer;
+      z-index: 5;
+    }
+    #boot-probe:hover { border-color: var(--accent); }
+    #boot-line {
+      color: var(--accent);
+      padding-top: 6px;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
     #assets {
       display: none;
       position: absolute;
@@ -144,7 +165,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
       word-break: break-all;
     }
   </style>
-<link rel="modulepreload" href="/skate2-web-67c21f93ca43c6ba.js" crossorigin="anonymous" integrity="sha384-l3+sHGyGzO9kII1OJK+BhQqedGxKoo2H9K42Ka0JbCj1206OTjQz91BEsqtjGsWy"><link rel="preload" href="/skate2-web-4333416a30185cbd_bg.wasm" crossorigin="anonymous" integrity="sha384-vQN6H33tZJxDDIKRH2HFgxDB3mE2RG8LtdkTgpqfiu0Q25qXCQAJG6StaB4qRBg6" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/skate2-web-c88ac5883e6785f4.js" crossorigin="anonymous" integrity="sha384-IAn7Xi4EMC7ULu2d9EjHCi8h59GZDaQ35kM9UDL1BvNPZoRiICIm7HHcptPK/dZZ"><link rel="preload" href="/skate2-web-ba668a03e4c6cfe7_bg.wasm" crossorigin="anonymous" integrity="sha384-5TK2LfHw5PGslVXoC2va0arOFUCKK1b1QPakbfECql8TteCe41HvBEz01sSrB/e+" as="fetch" type="application/wasm"></head>
 <body>
   <canvas id="skate2-canvas" tabindex="0"></canvas>
 
@@ -181,10 +202,12 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
        one (docs/WEB_PORT.md). -->
   <input type="file" id="game-folder" webkitdirectory multiple style="display:none">
   <button id="pick-folder">Load game folder…</button>
+  <button id="boot-probe">Run boot probe</button>
 
   <div id="assets">
     <div class="row"><span class="k">game data</span><span id="assets-found">—</span></div>
     <div id="assets-archives"></div>
+    <div id="boot-line"></div>
   </div>
 </body>
 </html>

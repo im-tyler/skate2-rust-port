@@ -15,6 +15,7 @@
 mod input;
 mod scene;
 
+mod boot_probe;
 #[cfg(target_arch = "wasm32")]
 mod game_files;
 #[cfg(target_arch = "wasm32")]
@@ -205,9 +206,13 @@ pub fn start() -> Result<(), wasm_bindgen::JsValue> {
         .ok_or_else(|| js_value("the #skate2-canvas canvas is missing"))?
         .dyn_into::<web_sys::HtmlCanvasElement>()
         .map_err(|_| js_value("#skate2-canvas is not a canvas"))?;
+    // The browser's configuration, before anything core touches a thread:
+    // every optional worker runs inline (docs/WEB_PORT_M5_PLAN.md).
+    skate2_core::host_thread::disable_worker_threads();
     // The game-data panel arms independently of the GPU: it works in every
     // browser, with or without WebGPU.
     arm_assets_panel();
+    arm_boot_probe();
     // Say it plainly before wgpu's adapter request fails obscurely.
     let gpu = js_sys::Reflect::get(
         &(window.navigator().into()),
@@ -320,6 +325,127 @@ fn arm_assets_panel() {
     KEEP.with(|keep| {
         keep.borrow_mut().extend([open, chosen]);
     });
+}
+
+/// Arms the boot probe (`docs/WEB_PORT_M5_PLAN.md`, phase 5): a button, and
+/// `?boot=1` for the automatic verification run. The probe uses the page's
+/// byte sources: the `?http=` base, or the folder picked into the assets
+/// panel (the picker keeps its files on the input element).
+#[cfg(target_arch = "wasm32")]
+fn arm_boot_probe() {
+    use wasm_bindgen::{JsCast, closure::Closure};
+    /// One event-listener closure, kept for the page's lifetime.
+    type Listener = Closure<dyn FnMut(web_sys::Event)>;
+    thread_local! {
+        /// The boot trigger's closures, kept alive for the page's lifetime.
+        static KEEP: std::cell::RefCell<Vec<Listener>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let Some(line) = document.get_element_by_id("boot-line") else {
+        return;
+    };
+    let start = {
+        let line = line.clone();
+        move || {
+            line.set_text_content(Some("boot probe: preparing…"));
+            let line = line.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let source = pick_boot_source();
+                let final_line = crate::boot_probe::run_boot_probe(&source, &line).await;
+                line.set_text_content(Some(&final_line));
+            });
+        }
+    };
+    let start = std::rc::Rc::new(start);
+    if let Some(button) = document.get_element_by_id("boot-probe") {
+        let start = std::rc::Rc::clone(&start);
+        let click = Closure::<dyn FnMut(web_sys::Event)>::new(move |_event: web_sys::Event| {
+            start();
+        });
+        button
+            .add_event_listener_with_callback("click", click.as_ref().unchecked_ref())
+            .ok();
+        KEEP.with(|keep| keep.borrow_mut().push(click));
+    }
+    let automatic = window.location().search().unwrap_or_default();
+    if automatic
+        .strip_prefix('?')
+        .is_some_and(|query| query.split('&').any(|pair| pair == "boot=1"))
+    {
+        start();
+    }
+}
+
+/// The boot probe's byte source: the `?http=` base, or the picked folder.
+#[cfg(target_arch = "wasm32")]
+fn pick_boot_source() -> BootSource {
+    use game_files::{HttpFiles, PickedFiles};
+    use wasm_bindgen::JsCast;
+    let window = web_sys::window();
+    let http = window
+        .as_ref()
+        .and_then(|window| window.location().search().ok())
+        .and_then(|search| {
+            search
+                .strip_prefix('?')
+                .and_then(|query| query.split('&').find_map(|pair| pair.strip_prefix("http=")))
+                .map(str::to_owned)
+        });
+    if let Some(base) = http {
+        return BootSource::Http(HttpFiles::new(&base));
+    }
+    let picked = window
+        .as_ref()
+        .and_then(web_sys::Window::document)
+        .and_then(|document| document.get_element_by_id("game-folder"))
+        .and_then(|element| element.dyn_into::<web_sys::HtmlInputElement>().ok())
+        .and_then(|input| PickedFiles::from_input(&input).ok());
+    match picked {
+        Some(files) => BootSource::Picked(files),
+        None => BootSource::None,
+    }
+}
+
+/// Which byte source the boot probe reads: the async trait is not
+/// object-safe, so the sources are one enum.
+#[cfg(target_arch = "wasm32")]
+enum BootSource {
+    Http(game_files::HttpFiles),
+    Picked(game_files::PickedFiles),
+    None,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl game_files::ByteSource for BootSource {
+    async fn present(&self, path: &str) -> Result<bool, String> {
+        match self {
+            Self::Http(source) => source.present(path).await,
+            Self::Picked(source) => source.present(path).await,
+            Self::None => Ok(false),
+        }
+    }
+
+    async fn read(&self, path: &str) -> Result<Vec<u8>, String> {
+        match self {
+            Self::Http(source) => source.read(path).await,
+            Self::Picked(source) => source.read(path).await,
+            Self::None => Err(format!("{path}: no game source (use ?http= or the picker)")),
+        }
+    }
+
+    async fn read_range(&self, path: &str, range: std::ops::Range<u64>) -> Result<Vec<u8>, String> {
+        match self {
+            Self::Http(source) => source.read_range(path, range).await,
+            Self::Picked(source) => source.read_range(path, range).await,
+            Self::None => Err(format!("{path}: no game source (use ?http= or the picker)")),
+        }
+    }
 }
 
 /// One source's report, as the panel's lines.
