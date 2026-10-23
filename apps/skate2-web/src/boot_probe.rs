@@ -161,6 +161,19 @@ fn parse_report(debug: &str) -> Result<ResidentBootReport, String> {
         resident_plans: usize::try_from(scalar("resident_plans")?)
             .map_err(|_| "the report's resident_plans is negative".to_owned())?,
         retained_counts: tuple("retained_counts")?,
+        // Milestone 5a: present in regenerated manifests, absent (zero) in
+        // bootstrap-only ones — the second collection never loads there.
+        second_plans: debug.find("second_plans: ").map_or(Ok(0), |_| {
+            scalar("second_plans").and_then(|value| {
+                usize::try_from(value)
+                    .map_err(|_| "the report's second_plans is negative".to_owned())
+            })
+        })?,
+        second_retained: if debug.contains("second_retained: (") {
+            tuple("second_retained")?
+        } else {
+            (0, 0)
+        },
     })
 }
 
@@ -180,6 +193,8 @@ mod tests {
                 bounds_max: [1159069696, 1139775930, 1157234688],
                 resident_plans: 21,
                 retained_counts: (21, 80),
+                second_plans: 0,
+                second_retained: (0, 0),
             }
         );
         assert_eq!(manifest.entries.len(), 12);
@@ -448,6 +463,8 @@ fn placeholder_report() -> (ResidentBootReport, f64, f64) {
             bounds_max: [0; 3],
             resident_plans: 0,
             retained_counts: (0, 0),
+            second_plans: 0,
+            second_retained: (0, 0),
         },
         0.0,
         0.0,

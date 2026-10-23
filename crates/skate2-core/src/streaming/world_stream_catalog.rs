@@ -318,6 +318,20 @@ impl WorldStreamCatalog {
         self.state.lock().map_err(|_| CatalogError::Poisoned)
     }
 
+    /// Every registered collection id, ascending: the deterministic walk a
+    /// host uses when it must choose among collections without an ordering
+    /// bias. The catalog's shared map has no iteration order of its own.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::Poisoned`] if a prior panic poisoned the
+    /// shared host-policy lock.
+    pub fn collection_ids(&self) -> Result<Vec<u64>, CatalogError> {
+        let mut ids: Vec<u64> = self.lock()?.collections.keys().copied().collect();
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
     /// Returns the registered collection payload offset widened from its raw
     /// XSM `u32`, matching `cAssetStreamManager::GetStreamOffset`
     /// (`0x82d599f0`).

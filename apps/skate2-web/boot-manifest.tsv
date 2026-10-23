@@ -1,5 +1,5 @@
 # skate2 boot manifest v1
-# report	ResidentBootReport { high_collections: 284, bounds_min: [3311468544, 3275851331, 3307372544], bounds_max: [1159069696, 1139775930, 1157234688], resident_plans: 21, retained_counts: (21, 80) }
+# report	ResidentBootReport { high_collections: 284, bounds_min: [3311468544, 3275851331, 3307372544], bounds_max: [1159069696, 1139775930, 1157234688], resident_plans: 21, retained_counts: (21, 80), second_plans: 0, second_retained: (0, 0) }
 # entries	12	stored_bytes	2815040
 data\content\worldbam.big	name	data\content\world\stream\BAM\BAM_Pres.xst	1042712	# at 56896
 data\content\worldbam.big	name	data\content\world\stream\BAM\BAM_Pres.xsm	29672	# at 1099648

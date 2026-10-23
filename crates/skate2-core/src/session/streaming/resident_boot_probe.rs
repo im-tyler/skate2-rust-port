@@ -3,7 +3,12 @@
 //! resident Simulation collection (`docs/WEB_PORT_M5_PLAN.md`, phase 3) —
 //! behind one non-blocking `poll`, reporting a summary that a native
 //! threaded run and a native threadless run must produce identically
-//! before the browser is involved at all.
+//! before the browser is involved at all. Milestone 5a adds the on-demand
+//! half: after the first `Done`, [`ResidentBootProbe::request_more`] loads
+//! a second, unprefetched district collection through the same machinery —
+//! on a span-backed mount its reads are misses, and `Retry`/`Reading` hold
+//! the line until the host's fetch makes them resident
+//! (`docs/WEB_PORT_M5A_PLAN.md`).
 //!
 //! PC port addition for the browser build; the streaming it drives is the
 //! production machinery, unchanged.
@@ -44,6 +49,12 @@ pub struct ResidentBootReport {
     pub resident_plans: usize,
     /// The resident asset services' `(resident, retained)` counts.
     pub retained_counts: (usize, usize),
+    /// How many arena plans the second, on-demand collection published
+    /// (`0` until [`ResidentBootProbe::request_more`] completes).
+    pub second_plans: usize,
+    /// The shared asset services' cumulative `(resident, retained)` counts
+    /// at the second load's completion (`(0, 0)` until then).
+    pub second_retained: (usize, usize),
 }
 
 /// One poll of the boot: which owner is current, and the report when both
@@ -54,6 +65,9 @@ pub enum ResidentBootPoll {
     Streaming,
     /// The stream finalized; the resident collection is loading.
     Resident,
+    /// The second, on-demand collection (requested by
+    /// [`ResidentBootProbe::request_more`]) is loading.
+    SecondResident,
     /// Both finished; the report is comparable across hosts.
     Done(ResidentBootReport),
 }
@@ -82,6 +96,7 @@ pub struct ResidentBootProbe {
     high_collections: Arc<AtomicU32>,
     resident: Option<SelectedResidentStartup>,
     report: Option<ResidentBootReport>,
+    second_requested: bool,
     stream_polls: u32,
     resident_polls: u32,
 }
@@ -119,6 +134,7 @@ impl ResidentBootProbe {
             high_collections,
             resident: None,
             report: None,
+            second_requested: false,
             stream_polls: 0,
             resident_polls: 0,
         })
@@ -132,6 +148,9 @@ impl ResidentBootProbe {
     /// Returns the failing owner's error as a `Debug` string; the probe
     /// keeps its state, and the host decides whether to stop.
     pub fn poll(&mut self) -> Result<ResidentBootPoll, String> {
+        if self.second_requested {
+            return self.poll_second();
+        }
         if let Some(report) = &self.report {
             return Ok(ResidentBootPoll::Done(report.clone()));
         }
@@ -175,12 +194,112 @@ impl ResidentBootProbe {
             bounds_max: [bounds.max[0], bounds.max[1], bounds.max[2]],
             resident_plans: resident.plans().map_or(0, <[_]>::len),
             retained_counts: resident.assets().retained_counts(),
+            second_plans: 0,
+            second_retained: (0, 0),
         };
         // The resident owner stays alive for the probe's lifetime, as the
         // corpus retains its stream: the loaded collection is not unloaded.
         self.resident = Some(resident);
         self.report = Some(report.clone());
         Ok(ResidentBootPoll::Done(report))
+    }
+
+    /// Requests the second, unprefetched resident collection after the first
+    /// [`ResidentBootPoll::Done`]: the deterministic sibling district — the
+    /// lexicographically first catalog collection of the grind corpus's own
+    /// class (`…_high.xsf`) whose id differs and whose asset count is
+    /// nonzero. The bootstrap manifest does not name it, so on a span-backed
+    /// mount its reads are exactly the on-demand misses [`Self::poll`] then
+    /// holds the line through. Later polls return
+    /// [`ResidentBootPoll::SecondResident`] until the second load completes
+    /// and `Done` reports both collections.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failing step as a `Debug` string: before the first
+    /// `Done`, after a second request, or when the catalog holds no sibling
+    /// district.
+    pub fn request_more(&mut self) -> Result<(), String> {
+        if self.report.is_none() {
+            return Err("request_more before the boot finished".to_owned());
+        }
+        if self.second_requested {
+            return Err("the second collection was already requested".to_owned());
+        }
+        let id = self.second_collection()?;
+        let Some(resident) = self.resident.as_mut() else {
+            return Err("the resident owner is gone".to_owned());
+        };
+        resident
+            .request_additional(CollectionId(id))
+            .map_err(|error| format!("request_more: {error:?}"))?;
+        self.second_requested = true;
+        Ok(())
+    }
+
+    /// The deterministic sibling district: a collection registered by the
+    /// grind corpus's own collection map (the same registration file, so the
+    /// same Simulation stream kind), whose id differs and whose asset count
+    /// is nonzero — the lexicographically first such path. A file the
+    /// bootstrap manifest does not name, so on a span-backed mount its reads
+    /// are exactly the on-demand misses.
+    fn second_collection(&self) -> Result<u64, String> {
+        let catalog = &self.stream.catalog;
+        let grind = catalog
+            .collection(BOOT_PROBE_COLLECTION)
+            .map_err(|error| format!("catalog grind: {error:?}"))?
+            .ok_or("the grind corpus collection is not registered")?;
+        let mut candidates: Vec<(String, u64)> = Vec::new();
+        for id in catalog
+            .collection_ids()
+            .map_err(|error| format!("catalog ids: {error:?}"))?
+        {
+            if id == BOOT_PROBE_COLLECTION {
+                continue;
+            }
+            let Some(collection) = catalog
+                .collection(id)
+                .map_err(|error| format!("catalog collection: {error:?}"))?
+            else {
+                continue;
+            };
+            if collection.asset_count == 0 || collection.owner != grind.owner {
+                continue;
+            }
+            candidates.push((collection.path.to_string(), id));
+        }
+        candidates.sort_unstable_by(|(path, _), (next, _)| path.cmp(next));
+        candidates
+            .first()
+            .map(|&(_, id)| id)
+            .ok_or_else(|| "no sibling district in the grind's collection map".to_owned())
+    }
+
+    /// Drives the second resident load to its own `Done`, extending the
+    /// first report with the second collection's plans and the services'
+    /// cumulative retained counts. Idempotent after completion.
+    fn poll_second(&mut self) -> Result<ResidentBootPoll, String> {
+        let Some(mut resident) = self.resident.take() else {
+            return Err("the resident owner is gone".to_owned());
+        };
+        self.resident_polls += 1;
+        let ready = resident
+            .poll()
+            .map_err(|error| format!("second resident: {error:?}"))?;
+        let poll = if ready {
+            let mut report = self
+                .report
+                .clone()
+                .ok_or("the second load has no first report")?;
+            report.second_plans = resident.plans().map_or(0, <[_]>::len);
+            report.second_retained = resident.assets().retained_counts();
+            self.report = Some(report.clone());
+            ResidentBootPoll::Done(report)
+        } else {
+            ResidentBootPoll::SecondResident
+        };
+        self.resident = Some(resident);
+        Ok(poll)
     }
 
     /// `(stream polls, resident polls)` — host diagnostics; not part of the
