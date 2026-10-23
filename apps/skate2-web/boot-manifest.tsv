@@ -1,0 +1,15 @@
+# skate2 boot manifest v1
+# report	ResidentBootReport { high_collections: 284, bounds_min: [3311468544, 3275851331, 3307372544], bounds_max: [1159069696, 1139775930, 1157234688], resident_plans: 21, retained_counts: (21, 80) }
+# entries	12	stored_bytes	2815040
+data\content\worldbam.big	name	data\content\world\stream\BAM\BAM_Pres.xst	1042712	# at 56896
+data\content\worldbam.big	name	data\content\world\stream\BAM\BAM_Pres.xsm	29672	# at 1099648
+data\content\worldbam.big	name	data\content\world\stream\BAM\BAM_Pres.xss	22744	# at 1129344
+data\content\worldbam.big	name	data\content\world\stream\BAM\BAM_Sim.xst	136664	# at 1152192
+data\content\worldbam.big	name	data\content\world\stream\BAM\BAM_Sim.xsm	29568	# at 1288896
+data\content\worldbam.big	name	data\content\world\stream\BAM\BAM_Sim.xss	22744	# at 1318464
+data\content\worldbam.big	name	data\content\world\stream\BAM\BAM_Tex.xst	335384	# at 1585408
+data\content\worldbam.big	name	data\content\world\stream\BAM\BAM_Tex.xsm	35184	# at 1920832
+data\content\worldbam.big	name	data\content\world\stream\BAM\BAM_Tex.xss	27064	# at 1956032
+data\content\worldbam.big	name	data\content\world\stream\BAM\cSim_500_900_high.xsf	1108224	# at 506926464
+data\big\miscload.big	name	data\stream\BAM_Pres.xml	12697	# at 323520
+data\big\miscload.big	name	data\stream\BAM_Sim.xml	12383	# at 336256
