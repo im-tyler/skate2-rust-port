@@ -127,7 +127,7 @@ const AMBIENT_LOAD_UPDATES: u64 = 8;
 struct PendingRecipe {
     ticket: LoadTicket,
     due: u64,
-    job: std::thread::JoinHandle<Result<PreparedAmbientRecipe, String>>,
+    job: crate::host_thread::WorkerHandle<Result<PreparedAmbientRecipe, String>>,
 }
 /// `SimCharacterManager::Unload` 0x82817910 of a recipe: the request completes
 /// (`OnUnloaded` 0x828154a0 -> RecipeMan) on the next RecipeMan update.
@@ -477,10 +477,10 @@ impl RecipeServices for Bridge<'_> {
             AmbientBegin::Cached(asset) => self.completed.push_back(LoadedRecipe { ticket, asset }),
             AmbientBegin::Load(request) => {
                 let mounts = Arc::clone(self.mounts);
-                let job = std::thread::Builder::new()
-                    .name("sk8 recipe decode".to_owned())
-                    .spawn(move || request.prepare(&mounts).map_err(|error| error.to_string()))
-                    .map_err(|error| RecipeBridgeError::Worker(error.to_string()))?;
+                let job = crate::host_thread::spawn("sk8 recipe decode", move || {
+                    request.prepare(&mounts).map_err(|error| error.to_string())
+                })
+                .map_err(|error| RecipeBridgeError::Worker(error.to_string()))?;
                 self.pending.push_back(PendingRecipe {
                     ticket,
                     due: self.updates + AMBIENT_LOAD_UPDATES,

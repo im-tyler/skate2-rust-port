@@ -264,14 +264,14 @@ pub(super) struct FrozenSkater {
 /// The career's autosaves being written: one thread at a time, in the order they were made.
 #[derive(Default)]
 pub(super) struct CareerSaves {
-    writing: Option<std::thread::JoinHandle<()>>,
+    writing: Option<crate::host_thread::WorkerHandle<()>>,
 }
 
 impl CareerSaves {
     pub(super) fn busy(&self)->bool {self.writing.as_ref().is_some_and(|w|!w.is_finished())}
     fn start(&mut self, write: impl FnOnce() + Send + 'static) {
         self.finish();
-        match std::thread::Builder::new().name("career save".into()).spawn(write) {
+        match crate::host_thread::spawn("career save", write) {
             Ok(writing) => self.writing = Some(writing),
             Err(e) => eprintln!("career: autosave failed: {e}"),
         }

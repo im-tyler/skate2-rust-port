@@ -31,7 +31,6 @@ use crate::{
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
-    thread::JoinHandle,
 };
 
 /// `scoring2_general`, its `default` collection, and the banked points above which
@@ -109,7 +108,7 @@ struct AiSceneLoad {
 }
 
 enum AiSceneState {
-    Loading(JoinHandle<Option<Arc<PreparedRecipe>>>),
+    Loading(crate::host_thread::WorkerHandle<Option<Arc<PreparedRecipe>>>),
     Loaded(Option<Arc<PreparedRecipe>>),
 }
 
@@ -614,10 +613,10 @@ impl<T, C> SelectedSession<T, C> {
                 if std::env::var_os("SKATE2_TRACE_AI").is_some() {
                     eprintln!("ai: scene load {recipe:#018x} {schema_name}");
                 }
-                let job = std::thread::Builder::new()
-                    .name("sk8 AI load".to_owned())
-                    .spawn(move || MountedPlayerRecipeLoad::try_prepare_marquee_scene(&mounts, &actual).ok())
-                    .ok()?;
+                let job = crate::host_thread::spawn("sk8 AI load", move || {
+                    MountedPlayerRecipeLoad::try_prepare_marquee_scene(&mounts, &actual).ok()
+                })
+                .ok()?;
                 Some(AiSceneLoad { schema_name, scene: AiSceneState::Loading(job) })
             });
             ai.manager().assets.streamed = Some(ai.scenes.streamed());

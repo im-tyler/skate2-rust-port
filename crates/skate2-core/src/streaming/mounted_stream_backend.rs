@@ -27,7 +27,7 @@ use std::{
     fmt, io,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Condvar, Mutex, MutexGuard},
-    thread::{self, JoinHandle},
+    thread,
 };
 
 /// Exact number of operations owned by the reference `xcore::FileLoader`.
@@ -462,7 +462,7 @@ impl Drop for MountedReadHandle {
 
 struct ReadScheduler {
     core: Arc<SchedulerCore>,
-    workers: Vec<JoinHandle<()>>,
+    workers: Vec<crate::host_thread::WorkerHandle<()>>,
     /// Inline mode (host policy: no worker threads): admitted reads run on
     /// the polling thread during `poll`, through the same state machine.
     inline: bool,
@@ -482,7 +482,7 @@ impl ReadScheduler {
         for index in 0..MAX_ACTIVE_ASYNC_READS {
             let worker_core = Arc::clone(&core);
             match crate::host_thread::spawn_worker(
-                thread::Builder::new().name(format!("skate2-stream-read-{index}")),
+                format!("skate2-stream-read-{index}"),
                 move || {
                     if catch_unwind(AssertUnwindSafe(|| worker_main(&worker_core))).is_err() {
                         worker_core.mark_fault(MountedReadSchedulerError::WorkerPanicked);

@@ -239,17 +239,14 @@ pub trait CollectionAssetBuilder<I> {
 }
 
 /// One queued job's construction running on its own worker thread.
-pub struct Prefetch<A, E>(std::thread::JoinHandle<Result<Option<A>, E>>);
+pub struct Prefetch<A, E>(crate::host_thread::WorkerHandle<Result<Option<A>, E>>);
 
 impl<A: Send + 'static, E: Send + 'static> Prefetch<A, E> {
     /// `None` when no worker could be started; the job then builds in place.
     pub fn spawn(build: impl FnOnce() -> Result<Option<A>, E> + Send + 'static) -> Option<Self> {
-        crate::host_thread::spawn_worker(
-            std::thread::Builder::new().name("sk8 arena decode".to_owned()),
-            build,
-        )
-        .ok()
-        .map(Self)
+        crate::host_thread::spawn_worker("sk8 arena decode", build)
+            .ok()
+            .map(Self)
     }
 }
 

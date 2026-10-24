@@ -2,10 +2,7 @@
 //! Sources: manager `Init826e3490`, `AddTree829aec18`, barriers829ae000,
 //! `RunSingleJob829b00b0`, `JobInstance::Run829aff10`, `Sync82a30088`.
 use super::{AnimationJobCode, AnimationJobManager, DormantAnimationJob};
-use std::{
-    sync::{Arc, Condvar, Mutex},
-    thread::{self, JoinHandle},
-};
+use std::sync::{Arc, Condvar, Mutex};
 
 #[path = "animation_job_affinity.rs"]
 pub(crate) mod affinity;
@@ -79,7 +76,7 @@ struct Shared {
 /// source priority128; per-job affinity and submission order remain retained.
 pub(crate) struct AnimationSchedulerBackend {
     shared: Arc<Shared>,
-    workers: Vec<JoinHandle<()>>,
+    workers: Vec<crate::host_thread::WorkerHandle<()>>,
     pub(crate) source_processors: [u32; 3],
     pub(crate) worker_affinity: u32,
     pub(crate) calling_thread_may_run_deferred: bool,
@@ -116,13 +113,11 @@ impl AnimationJobManager {
         for _ in backend.source_processors {
             let shared = Arc::clone(&backend.shared);
             let worker_affinity = backend.worker_affinity;
-            let worker = thread::Builder::new()
-                .name("Job Manager - Job Thread".into())
-                .spawn(move || {
-                    let _host_thread = crate::host_thread::WorkerThreadScope::enter();
-                    worker_loop(&shared, worker_affinity);
-                })
-                .map_err(|_| AnimationExecutionError::ThreadSpawn)?;
+            let worker = crate::host_thread::spawn("Job Manager - Job Thread", move || {
+                let _host_thread = crate::host_thread::WorkerThreadScope::enter();
+                worker_loop(&shared, worker_affinity);
+            })
+            .map_err(|_| AnimationExecutionError::ThreadSpawn)?;
             backend.workers.push(worker);
         }
         self.scheduler = Some(Arc::new(backend));

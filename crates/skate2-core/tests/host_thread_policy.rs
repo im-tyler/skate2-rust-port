@@ -6,10 +6,7 @@ use std::io;
 #[test]
 fn spawn_worker_refuses_after_the_host_disables_workers() {
     skate2_core::host_thread::disable_worker_threads();
-    let outcome = skate2_core::host_thread::spawn_worker(
-        std::thread::Builder::new().name("policy probe".to_owned()),
-        || (),
-    );
+    let outcome = skate2_core::host_thread::spawn_worker("policy probe", || ());
     assert!(
         matches!(
             &outcome,

@@ -771,17 +771,14 @@ fn warm_decode(owner: Arc<SimulationStaticArenaPlan>, mesh_index: usize, cache: 
         OnceLock::new();
     let decoder = DECODER.get_or_init(|| {
         let (sender, receiver) = std::sync::mpsc::channel::<WarmDecode>();
-        crate::host_thread::spawn_worker(
-            std::thread::Builder::new().name("sk8 ground decode".to_owned()),
-            move || {
-                for (owner, mesh_index, cache) in receiver {
-                    let mesh = &owner.asset().collision.meshes[mesh_index];
-                    cache.get_or_init(|| {
-                        PreparedMeshTriangles::new(&mesh.clustered_mesh, &mesh.object_bytes)
-                    });
-                }
-            },
-        )
+        crate::host_thread::spawn_worker("sk8 ground decode", move || {
+            for (owner, mesh_index, cache) in receiver {
+                let mesh = &owner.asset().collision.meshes[mesh_index];
+                cache.get_or_init(|| {
+                    PreparedMeshTriangles::new(&mesh.clustered_mesh, &mesh.object_bytes)
+                });
+            }
+        })
         .ok()
         .map(|_| std::sync::Mutex::new(sender))
     });

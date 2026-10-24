@@ -126,7 +126,7 @@ pub(crate) struct SceneCharacterModels {
 /// finalized scene.
 struct PendingScene {
     slot: usize,
-    job: Option<std::thread::JoinHandle<Result<(u32, FinalizedRecipeScene), String>>>,
+    job: Option<crate::host_thread::WorkerHandle<Result<(u32, FinalizedRecipeScene), String>>>,
 }
 
 impl Default for SceneCharacterModels {
@@ -180,15 +180,17 @@ impl SceneCharacterModels {
             for character in characters.iter().filter(|c| !c.borrowed) {
                 let (mounts, category, schema, clone_type) =
                     (Arc::clone(mounts), character.category.clone(), character.schema.clone(), self.clone_type);
-                let job = std::thread::Builder::new()
-                    .name("sk8 viewer load".to_owned())
-                    .spawn(move || {
-                        let path = recipe_path(&category, &schema);
-                        let recipe = CharacterRecipe::parse(&mounts.read_path(&path).map_err(|e| format!("{path}: {e}"))?)
-                            .map_err(|e| format!("{path}: {e}"))?;
-                        prepare_scene(&mounts, recipe, &category, clone_type)
-                    })
-                    .ok();
+                let job = crate::host_thread::spawn("sk8 viewer load", move || {
+                    let path = recipe_path(&category, &schema);
+                    let recipe = CharacterRecipe::parse(
+                        &mounts
+                            .read_path(&path)
+                            .map_err(|e| format!("{path}: {e}"))?,
+                    )
+                    .map_err(|e| format!("{path}: {e}"))?;
+                    prepare_scene(&mounts, recipe, &category, clone_type)
+                })
+                .ok();
                 self.pending.push(PendingScene { slot: character.slot, job });
             }
             self.built = built;

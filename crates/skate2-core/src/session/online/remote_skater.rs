@@ -484,7 +484,8 @@ pub(super) struct RemoteSkater {
     /// No frame for [`STALE_TICKS`]: the skater is not shown.
     stale: bool,
     /// The character a recipe is building on its own thread, and how long it took.
-    building: Option<std::thread::JoinHandle<(Result<Character, String>, std::time::Duration)>>,
+    building:
+        Option<crate::host_thread::WorkerHandle<(Result<Character, String>, std::time::Duration)>>,
 }
 
 fn header_bytes(words: &[u32; HEADER_WORDS]) -> [u8; HEADER_BYTES] {
@@ -533,9 +534,7 @@ impl RemoteSkater {
     /// The thread could not start.
     pub(super) fn build_character(&mut self, data: Vec<u8>, mounts: Arc<MountSet>, vault: Arc<AttributeRuntimeVault>, cvars: InputCvarReferences) -> Result<(), String> {
         let user_id = self.user_id;
-        let thread = std::thread::Builder::new()
-            .name("sk8 remote character".into())
-            .spawn(move || {
+        let thread = crate::host_thread::spawn("sk8 remote character", move || {
                 let start = std::time::Instant::now();
                 (Character::build(&data, user_id, &mounts, &vault, &cvars), start.elapsed())
             })

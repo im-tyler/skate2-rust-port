@@ -12,7 +12,7 @@ pub(crate) fn queue(read: impl FnOnce() + Send + 'static) {
     let reader = READER.get_or_init(|| {
         let (sender, receiver) = mpsc::channel::<Read>();
         crate::host_thread::spawn_worker(
-            std::thread::Builder::new().name("sk8 stream read".to_owned()),
+            "sk8 stream read",
             move || {
                 for read in receiver {
                     read();
