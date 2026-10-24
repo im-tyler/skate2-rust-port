@@ -15,6 +15,8 @@
 mod input;
 mod scene;
 
+#[cfg(any(target_arch = "wasm32", test))]
+mod audio_probe;
 mod boot_probe;
 #[cfg(target_arch = "wasm32")]
 mod game_files;
@@ -213,6 +215,7 @@ pub fn start() -> Result<(), wasm_bindgen::JsValue> {
     // browser, with or without WebGPU.
     arm_assets_panel();
     arm_boot_probe();
+    arm_audio_probe();
     // Say it plainly before wgpu's adapter request fails obscurely.
     let gpu = js_sys::Reflect::get(
         &(window.navigator().into()),
@@ -379,6 +382,57 @@ fn arm_boot_probe() {
         .is_some_and(|query| query.split('&').any(|pair| pair == "boot=1"))
     {
         start();
+    }
+}
+
+/// Arms the audio probe (`docs/WEB_PORT_M6_PLAN.md`, phase 2): a button, and
+/// `?audio=1` for the automatic verification run, over the boot probe's byte
+/// sources.
+#[cfg(target_arch = "wasm32")]
+fn arm_audio_probe() {
+    use wasm_bindgen::{JsCast, closure::Closure};
+    /// One event-listener closure, kept for the page's lifetime.
+    type Listener = Closure<dyn FnMut(web_sys::Event)>;
+    thread_local! {
+        /// The audio trigger's closure, kept alive for the page's lifetime.
+        static KEEP: std::cell::RefCell<Option<Listener>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let Some(line) = document.get_element_by_id("audio-line") else {
+        return;
+    };
+    let start = move || {
+        line.set_text_content(Some("audio probe: preparing…"));
+        let line = line.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let source = pick_boot_source();
+            let final_line = crate::audio_probe::run_audio_probe(&source, &line).await;
+            line.set_text_content(Some(&final_line));
+        });
+    };
+    let automatic = window
+        .location()
+        .search()
+        .unwrap_or_default()
+        .strip_prefix('?')
+        .is_some_and(|query| query.split('&').any(|pair| pair == "audio=1"));
+    if automatic {
+        start();
+    }
+    if let Some(button) = document.get_element_by_id("audio-probe") {
+        let click = Closure::<dyn FnMut(web_sys::Event)>::new(move |_event: web_sys::Event| {
+            start();
+        });
+        button
+            .add_event_listener_with_callback("click", click.as_ref().unchecked_ref())
+            .ok();
+        KEEP.with(|keep| *keep.borrow_mut() = Some(click));
     }
 }
 

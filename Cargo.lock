@@ -2285,6 +2285,7 @@ dependencies = [
  "getrandom 0.3.4",
  "js-sys",
  "pollster 0.3.0",
+ "skate2-audio",
  "skate2-core",
  "skate2-formats",
  "wasm-bindgen",

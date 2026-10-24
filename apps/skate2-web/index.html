@@ -104,7 +104,7 @@
       z-index: 5;
     }
     #pick-folder:hover { border-color: var(--accent); }
-    #boot-probe {
+    #boot-probe, #audio-probe {
       position: absolute;
       bottom: 54px;
       right: 12px;
@@ -118,8 +118,9 @@
       cursor: pointer;
       z-index: 5;
     }
-    #boot-probe:hover { border-color: var(--accent); }
-    #boot-line {
+    #audio-probe { bottom: 96px; }
+    #boot-probe:hover, #audio-probe:hover { border-color: var(--accent); }
+    #boot-line, #audio-line {
       color: var(--accent);
       padding-top: 6px;
       white-space: pre-wrap;
@@ -192,11 +193,13 @@
   <input type="file" id="game-folder" webkitdirectory multiple style="display:none">
   <button id="pick-folder">Load game folder…</button>
   <button id="boot-probe">Run boot probe</button>
+  <button id="audio-probe">Run audio probe</button>
 
   <div id="assets">
     <div class="row"><span class="k">game data</span><span id="assets-found">—</span></div>
     <div id="assets-archives"></div>
     <div id="boot-line"></div>
+    <div id="audio-line"></div>
   </div>
 </body>
 </html>

@@ -27,6 +27,14 @@ pub const ORACLE_SEEDS: SystemSeeds = SystemSeeds {
     contexts: 0xa5e3_d0c5,
 };
 
+/// [`pause_menu_press_render`]'s hash, recorded once (2026-10-23) by the pc
+/// corpus test: with [`ORACLE_SEEDS`] and [`AbsentStreams`] it is
+/// bit-identical across runs, and every host must reproduce it.
+pub const PAUSE_MENU_PRESS_HASH: u64 = 0x76d0_19a2_c241_ba4e;
+
+/// Where [`PAUSE_MENU_PRESS_HASH`] was recorded.
+pub const PAUSE_MENU_PRESS_PLATFORM: &str = "macOS aarch64, rustc 1.99.0, NTSC dump";
+
 /// The oracle's stream files: nothing exists. Every read fails at `size`, so
 /// the speech projects load empty, the resident samples stay absent, and the
 /// pool's streams never hold a chunk — on any host, threaded or not.
@@ -60,9 +68,9 @@ pub fn frame_hash(frames: &[f32]) -> u64 {
 /// state — `Audio.PlaySound(FE_SOUND_PAUSE_MENU_PRESS)`, then the same
 /// update/render cadence the pc corpus test drives (one update per 60 Hz tick,
 /// 256-frame blocks until the tick's boundary). Returns the rendered frames'
-/// hash. The system must have been built with [`ORACLE_SEEDS`] and
-/// [`AbsentStreams`].
-pub fn pause_menu_press_render(system: &mut AudioSystem, key: u64) -> u64 {
+/// hash and their count. The system must have been built with
+/// [`ORACLE_SEEDS`] and [`AbsentStreams`].
+pub fn pause_menu_press_render(system: &mut AudioSystem, key: u64) -> (u64, usize) {
     system.state = GameAudioState {
         hud_state: hud_state::FREE_SKATE,
         ..GameAudioState::default()
@@ -77,5 +85,5 @@ pub fn pause_menu_press_render(system: &mut AudioSystem, key: u64) -> u64 {
             mixed += 256.0 / 48_000.0;
         }
     }
-    frame_hash(&stereo)
+    (frame_hash(&stereo), stereo.len() / 2)
 }

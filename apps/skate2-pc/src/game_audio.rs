@@ -996,10 +996,6 @@ mod tests {
         )
     }
 
-    /// Recorded once (2026-10-23, macOS aarch64, rustc 1.99.0, the NTSC dump):
-    /// the pause-menu press render of `skate2_audio::oracle`, seeds and streams pinned.
-    const PAUSE_MENU_ORACLE_HASH: u64 = 0x76d0_19a2_c241_ba4e;
-
     #[test]
     #[ignore = "requires external SKATE2_GAME_ROOT"]
     fn pause_menu_sound_renders() {
@@ -1061,16 +1057,18 @@ mod tests {
         let (mut first, globals) = oracle_load_system(&mounts).unwrap();
         let (mut second, _) = oracle_load_system(&mounts).unwrap();
         let key = globals["FE_SOUND_PAUSE_MENU_PRESS"];
-        let hash = skate2_audio::oracle::pause_menu_press_render(&mut first, key);
-        let repeat = skate2_audio::oracle::pause_menu_press_render(&mut second, key);
+        let (hash, _) = skate2_audio::oracle::pause_menu_press_render(&mut first, key);
+        let (repeat, _) = skate2_audio::oracle::pause_menu_press_render(&mut second, key);
         eprintln!("pause-menu oracle hash: {hash:#018x}");
         assert_eq!(
             hash, repeat,
             "the pinned, stream-free render must be stable across builds"
         );
         assert_eq!(
-            hash, PAUSE_MENU_ORACLE_HASH,
-            "the recorded oracle (macOS aarch64, rustc 1.99.0, NTSC dump)"
+            hash,
+            skate2_audio::oracle::PAUSE_MENU_PRESS_HASH,
+            "the recorded oracle ({})",
+            skate2_audio::oracle::PAUSE_MENU_PRESS_PLATFORM
         );
     }
 

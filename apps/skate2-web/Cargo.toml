@@ -9,7 +9,8 @@ rust-version.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-skate2-core = { path = "../../crates/skate2-core" }
+skate2-audio = { path = "../../crates/skate2-audio" }
+skate2-core = { path = "../../crates/skate2-core", features = ["audio"] }
 skate2-formats = { path = "../../crates/skate2-formats" }
 wgpu = "=30.0.1"
 winit = "=0.29.15"
