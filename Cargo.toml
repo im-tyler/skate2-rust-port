@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "apps/skate2-bridge",
     "apps/skate2-pc",
     "apps/skate2-server",
     "apps/skate2-web",

@@ -238,6 +238,9 @@ dev-dependency), workspace `Cargo.toml`.
   direct UDP — against fresh `ServerCore`s with a fixed seed, asserting
   the identical ordered `ClientEvent` sequence with payloads (RTT,
   addresses, counts excluded).
+  Amended on evidence: the fixed seed does not fix user ids — the server
+  draws them from the system's random source on purpose (`server.rs`'s
+  `Random`), so the client's own id is compared as a placeholder.
 - Gate: `cargo test -p skate2-bridge -p skate2-net`; ratchet; scoped
   clippy/fmt.
 

@@ -1,0 +1,16 @@
+[package]
+name = "skate2-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+tungstenite = "=0.30.0"
+
+[dev-dependencies]
+skate2-net = { path = "../../crates/skate2-net" }
+
+[lints]
+workspace = true
