@@ -1,5 +1,9 @@
 # Web port milestone 6: audio and networking in the tab
 
+**Executed** (2026-10-24): phases 1a-1c, 2a, 2, 3, 4, 5a, 5b and 6, commits
+`7d974cb` through the docs commit; results in `docs/WEB_PORT.md`
+("Milestone six"). Amendments made on evidence are marked in place.
+
 Execution plan for milestone 6 of `docs/WEB_PORT.md`. Same rules as
 `docs/WEB_PORT_M5A_PLAN.md` section 0 (AGENTS.md binding; line endings; one
 phase = one commit; gates are the AGENTS.md checkpoint — `cargo test
@@ -275,6 +279,11 @@ the milestone's run sets; production defaults untouched).
   frames acked` — the full join sequence, not socket-open.
 - Gate: headless run against a live `skate2-server` (explicit build id)
   plus the bridge; the server console corroborates.
+
+- As built: the verification build id is `SKATE2_SERVER_BUILD=development`,
+  honoured only by development server builds; `ClientCore` lives in an
+  `Rc<RefCell>` (single-threaded tab), and `ClientCore::frames_acknowledged`
+  (read-only) makes "frames acked" observable.
 
 Commit: `Web port step six (h): a browser client joins the native server`.
 

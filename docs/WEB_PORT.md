@@ -22,6 +22,8 @@ blocks a proper port.
 | The mount set (asset step four) | done — all twenty archive tables mounted in `RemoteMountSet` (18,274 entries), virtual-path reads routed across archives in mount order: `skater.vlt` via `db.big`, a shader XML via `render.big` |
 | Core streaming in the tab (milestone five) | done — the real `SelectedWorldStream` + `SelectedResidentStartup` boot runs single-threaded in the browser over prefetched spans (2.7 MiB, 12 entries) and reports `done — matches native`: 284 high collections, the corpus bounds bits, 21 plans, (21, 80) retained — identical to the native threaded oracle (`docs/WEB_PORT_M5_PLAN.md`) |
 | On-demand streaming (milestone 5a) | done — a resident-span miss answers `WouldBlock` instead of failing; the read scheduler retries (`SourceRead::Retry`) and the collection producer reports `Reading` without latching, while the host's miss handler fetches the missed span over HTTP — so a second, unprefetched district collection loads on demand in the tab (1 span, 62 KiB, fetched once; 767 misses retried) with the extended report identical to the native pin (`docs/WEB_PORT_M5A_PLAN.md`) |
+| Audio in the tab (milestone six) | done — one bytes-in loader (`skate2_audio::load`) builds the system for the pc app and the tab alike; the pause-menu press sound renders the pinned stream-free oracle `0x76d019a2c241ba4e` (recorded on macOS aarch64, rustc 1.99.0) bit-for-bit in headless Chrome's wasm32, and plays through Web Audio |
+| Networking in the tab (milestone six) | done — a browser client joins a live native `skate2-server` through the WebSocket bridge (`apps/skate2-bridge`, event parity with direct UDP): signed in, free-skate lobby joined, synthetic frames acked continuously; `skate2-net` runs on `web_time::Instant` |
 | Real renderer / session / original assets in the browser | not started — see the blockers below |
 
 ## The port's road
@@ -37,8 +39,8 @@ counts:
 | 4 | The async mount set: all twenty archives mounted in WASM | done |
 | 5 | Core streaming in the tab (single-threaded, prefetched) | done |
 | 5a | On-demand streaming: a resident-span miss becomes a pending read | done |
-| 6 | Audio (Web Audio + XMA) and networking (WebSockets) | next |
-| 7 | The real renderer and booting a session in the tab | |
+| 6 | Audio (Web Audio + XMA) and networking (WebSockets) | done |
+| 7 | The real renderer and booting a session in the tab | next |
 
 ## Building and running
 
@@ -59,8 +61,9 @@ Trunk 0.22 notes (encoded in `Trunk.toml` and `index.html`): `[build] target`
 is the HTML entry file, not the Rust triple (wasm32 is implied), and
 `index.html` selects the **cdylib** artifact with
 `<link data-trunk rel="rust" data-target-name="skate2_web">` so the
-desktop-only debug binary is not bundled. A release bundle is roughly
-0.4 MB of WebAssembly plus 0.1 MB of loader.
+desktop-only debug binary is not bundled. A release bundle is about
+2.4 MiB of WebAssembly (1.0 MB gzipped) plus 0.1 MB of loader since
+milestone six linked the audio and network stacks.
 
 The same crate also runs on the desktop as a debug harness for the scene,
 where blocking on wgpu's async setup is allowed:
@@ -70,10 +73,39 @@ cargo run -p skate2-web    # from the repository root
 ```
 
 Validation for the crate: `cargo fmt -p skate2-web -- --check`,
-`cargo test -p skate2-web` (12 tests: key ramps, XInput bit mappings,
-Gamepad-API-to-XInput conversion, pad platform slots), and
+`cargo test -p skate2-web` (17 tests, among them key ramps, XInput bit
+mappings, Gamepad-API-to-XInput conversion, pad platform slots and the boot
+manifest parser, plus the ignored audio-probe corpus test that needs
+`SKATE2_GAME_ROOT`), and
 `cargo clippy -p skate2-web --all-targets` on both the host and
 wasm32-unknown-unknown targets.
+
+The milestone-six checks run against a served dump: `?http=<dump base>`
+needs a server that answers `Range` requests and sends CORS headers (every
+probe reads entries out of archives by range). `?audio=1` (or the "Run
+audio probe" button) runs the audio probe; the "Play pause-menu sound"
+button is the gesture that resumes the `AudioContext` and plays the press
+— the first press fetches and builds the system, later presses play again
+— and `?audio=play` presses once on load (a browser's autoplay rule still
+wants a gesture unless it is lifted, as in the headless runs). The online
+client talks to a native server through the bridge:
+
+```sh
+cargo run -p skate2-bridge -- --listen 127.0.0.1:8787 --server <udp addr>
+```
+
+and the page is opened with `?server=<bridge url>` (`ws://127.0.0.1:8787`
+for the line above, URL-encoded in the query) and an optional `&nick=`, or
+the bridge URL and nickname are typed into the fields beside "Join
+server". The tab presents the development build, so the server it joins
+is a development build started for the verification:
+
+```sh
+SKATE2_SERVER_BUILD=development cargo run --release -p skate2-server -- 127.0.0.1:32082
+```
+
+A release build of the server ignores the variable; without it a
+development server refuses the tab (`refuse::BUILD`).
 
 ## What the browser build contains
 
@@ -104,6 +136,14 @@ wasm32-unknown-unknown targets.
   two smallest self-contained tables (`globallocators`, `db` — a `Viv4`
   archive's `.bh` is read when the `.big` is data only) through the real
   `skate2_formats` parser in WASM.
+- `src/audio_probe.rs` — milestone six's audio oracle in the tab, split into
+  fetch / build / render so the player reuses it (below).
+- `src/audio_out.rs` — the Web Audio player: a `ScriptProcessorNode` pull
+  over `skate2_audio::output::MixResampler`, the same queue and linear
+  resampler the pc's cpal `Output` uses.
+- `src/online.rs` — the online client host: `ClientCore` over a
+  WebSocket to the bridge, a synthetic free-skate session (see the
+  networking section below).
 
 ### Keyboard mapping
 
@@ -177,19 +217,27 @@ In rough dependency order, with the code that has to move:
    `finish_initial_load`'s sleep loop, remote skater, career saves, the RNG
    seed and `diagnostics` clock — are session-boot (milestone seven)
    concerns, off the streaming path.
-3. **Networking** — `skate2-net`'s client transport is `std::net` TCP; the
-   browser offers WebSockets/WebTransport instead. Randomness is already
-   solved (see the getrandom note above). The server stays native.
-4. **Audio** — `skate2-audio`/`skate2-xma` are cpal and synchronous decode;
-   the browser needs Web Audio with decoded buffers. Pre-converted audio
-   packs (option 3 above) would keep XMA decoding offline.
+3. **Networking** — resolved for joining by milestone six. The client
+   transport is UDP: sealed datagrams driven through the pure
+   `ClientCore` (`receive(bytes, now)` / `update(now)` /
+   `take_outgoing()`), and a page cannot open a UDP socket. The server
+   stays native; `apps/skate2-bridge` carries the datagrams verbatim over
+   WebSockets, and `skate2-net` takes its clock from `web_time::Instant`
+   (the std type on native) so the cores no longer trap on wasm32.
+   Randomness was already solved (the getrandom note above). What remains
+   is gameplay frames over the session — milestone seven.
+4. **Audio** — resolved for the press-sound path by milestone six, without
+   pre-converted packs: `skate2-audio`/`skate2-xma` run in the tab as-is,
+   decoding XMA in WASM, and a Web Audio pull replaces cpal. Streams
+   (music, speech) do not run in the tab yet (below), and the bootstrap
+   is heavy.
 5. **The renderer** — the real render stack lives in `apps/skate2-pc`
    (wgpu, but native windowing and asset plumbing). Moving it to the web app
    is a port of its own; the test scene only validates the substrate.
 6. **What already ports cleanly** — `skate2-core` (minus streaming), 
-   `skate2-formats` (readers, once fed async bytes) and `skate2-net`'s
-   protocol layer compile for wasm32 today; the web crate links core on both
-   targets and its clippy/test gates pass.
+   `skate2-formats` (readers, once fed async bytes), `skate2-audio`,
+   `skate2-xma` and `skate2-net`'s protocol layer compile for wasm32 today;
+   the web crate links core on both targets and its clippy/test gates pass.
 
 Verification so far: the release bundle loads in Chrome, initialises the
 `BrowserWebGPU` adapter, presents the plaza (canvas pixels match the lit
@@ -239,3 +287,147 @@ nothing was prefetched for it: one ranged fetch of `worldbam.big` bytes
 future gates: drive the browser check with real time; headless
 `--virtual-time-budget` starves the cooperative `setTimeout` loop and
 freezes the panel mid-boot.
+
+## Milestone six: audio and networking
+
+Planned and executed per `docs/WEB_PORT_M6_PLAN.md`; the commit bodies
+carry the measurements quoted here.
+
+### Audio
+
+The system loader moved into `skate2-audio` as bytes-in: `skate2_audio::load`
+holds the bank/interface tables, the recorded loose `.snr`/`.sek` name list
+(a byte source cannot enumerate a directory), `fe_sounds` over
+`AttribSource`, and `read_inputs` — the archive-level assembly — over an
+`AudioFiles` host trait. The pc app supplies a disk `AudioFiles`, the tab
+span-mounted archives; `skate2-core` implements `AttribSource` for
+`AttribDb` behind an optional `audio` feature, so there is one vault
+adapter and no forked loader. Native behavior was proven unchanged at each
+step (every input count and byte, all 168 fe leaves, the assembly order,
+the oracle hash).
+
+The oracle is the pause-menu press: pinned seeds, absent streams, 180 ticks
+at 60 Hz, FNV-1a over the frames' f32 bits. It was recorded as
+`0x76d019a2c241ba4e` on macOS aarch64 with rustc 1.99.0 over the NTSC dump,
+bit-identical across three fresh processes, and both hosts assert the one
+constant (`oracle::PAUSE_MENU_PRESS_HASH`). The tab reproduces it:
+
+```
+audio probe: 144128 frames, hash matches native (0x76d019a2c241ba4e);
+2081 stream opens answered absent, 0 stream reads, 0 span misses;
+fetched 64.6 MiB in 0.8s, built and rendered in 0.2s
+```
+
+(headless Chrome 155, `trunk --release`, three fresh loads identical) —
+the first cross-host determinism proof of the audio stack: aarch64 native
+and wasm32 agree to the bit. The tab makes exactly `load::wanted_entries`
+(plus `skater.vlt` and the `.bin`s it names) resident with no miss handler,
+so an unplanned read is a hard error; an ignored native corpus test runs
+the same planned spans minus the fetch transport, which is what proves the
+entry list complete.
+
+Audible: `src/audio_out.rs` pulls 2048-frame blocks through a
+`ScriptProcessorNode`, and a 60 Hz `setInterval` drives `update(1/60)` in
+whole ticks against the page clock (at most four per firing). Headless
+Chrome 155, autoplay gesture lifted: `audio out: Running at 44100 Hz
+(2048-frame main-thread pulls); 141 blocks pulled, peak 0.1172, 0 late; 1
+presses` (44.1 kHz resampled from the 48 kHz mix; the native 48 kHz render
+peaks at 0.1209). Audibility itself is a hand check, like the picker.
+
+**The main-thread tradeoff.** `ScriptProcessorNode` is deprecated and runs
+on the main thread — the thread the single-threaded wasm system lives on,
+which is why it was chosen: no `SharedArrayBuffer` is needed. A long
+main-thread task makes a block late (counted as `late`). The follow-up is
+an `AudioWorklet` reading a `SharedArrayBuffer` ring, which needs
+cross-origin isolation (COOP/COEP headers on the page) and the audio system
+moved to a worker.
+
+**Bootstrap weight.** The tab fetches 64.6 MiB for the oracle — the
+loader's whole input set (the native loader reads ≈66.4 MiB), far more than
+the press sound uses. Narrowing it to a needed set is the audio-manifest
+work of a future milestone.
+
+### Web-vs-PC deviations
+
+Documented exceptions, not parity claims:
+
+| Deviation | PC | Web |
+| --- | --- | --- |
+| Generator seeds (music mftb, speech `time64`, speech context) | drawn from the clock, as before | explicit inputs; the oracle pins `ORACLE_SEEDS` (`SystemTime`/`Instant` trap on wasm32) |
+| Streams (music, speech projects, the pool's chunk reads) | read by the stream pool's reader threads | absent: the oracle runs with `AbsentStreams` on both hosts; on wasm the pool's reader-thread spawn fails and the stream closes, rendering identically to native's dropped requests |
+
+The oracle needs both: the clock seeds made three native renders differ,
+and the music reader thread races the render when it outruns real time (a
+`music_mode` of OFF does not stop the music stream). Music and speech
+cannot run on wasm today — there are no reader threads — so a web session
+has none until the stream pool gains a threadless path.
+
+### Networking
+
+`apps/skate2-bridge` (std threads, `tungstenite =0.30.0`, no TLS) gives each
+WebSocket connection its own thread and its own UDP socket connected to the
+configured server, so the server sees one address per browser client. Each
+binary message is one datagram out, each datagram one binary message back —
+nothing decrypted, inspected, reordered or merged; text frames close the
+connection. Its parity test runs one client script (sign in, create a
+free-skate lobby, ten runs of synthetic frames) direct and through the
+bridge against fresh `ServerCore`s on real sockets; the ordered events are
+identical, 5 runs of 5: `SignedIn`, `PlayNowResult 0`, `GameJoined` (game
+1, slot 0, `LobbySkate`, the client itself as player 0), `ChatEnabled`. A
+fixed server seed does not fix user ids — the server draws them from the
+system's random source on purpose — so the client's own id is compared as a
+placeholder.
+
+`skate2-net` takes its `Instant` from `web-time` (`=1.1.0`): the std type on
+native (all 72 `skate2-net` tests pass with no expected value edited), a
+`performance.now()` clock on wasm32.
+
+The browser client joins the native server through the bridge.
+`src/online.rs` holds `ClientCore` in an `Rc<RefCell>` on the main thread.
+Binary WebSocket messages feed `receive` and pump the core at once, and a
+50 ms timer pumps it too: even throttled to a background tab's ~1 s, the
+timer stays inside the server's 2 s inactivity kick, and the message path
+keeps the core served regardless. On sign-in the client creates a free-skate
+lobby and sends a stand-in recipe (frames are acked only for members with
+one); once joined it sends `INTERVAL` synthetic frames every 50 ms, ticks
+counted in the header word the protocol tests use — not gameplay.
+Identity: the tab has no build script and presents `Build::DEVELOPMENT`,
+which a development server's random secret refuses. `SKATE2_SERVER_BUILD=
+development` makes a development server take the development build for
+the verification; a release build — one carrying its update public key —
+reports and ignores it, so no production check is weakened. Headless
+Chrome 155, release builds, a live `skate2-server` and the bridge:
+
+```
+online: connected to ws://127.0.0.1:8787 as TabSkater, signed in,
+lobby joined (game 1, slot 0), frames acked through tick 347 of 351
+sent, rtt 9 ms
+```
+
+with acks advancing for the whole run, well past the 2 s kick, and the
+server console corroborating each step (`signed in as TabSkater`, `game 1
+created: type 8 challenge 0000000000000055`, `TabSkater joined game 1 in
+slot 0`). The other direction holds too: the same tab against a server
+without the variable is refused with `Refused(4)` (`refuse::BUILD`).
+`ClientCore::frames_acknowledged` (read-only, no behavior change) makes
+the acks observable; the bridge parity test asserts one on both paths.
+
+**Bridge deployment notes.** An https page needs `wss`, so TLS is
+terminated in front of the bridge (the bridge has none). Bridged clients
+share the bridge's IP and the server admits at most 8 connections per IP
+(`MAX_CONNECTIONS_PER_IP`), so at most 8 bridged clients reach one server.
+The UDP target is the bridge's `--server` configuration, never chosen by
+the page, so the bridge is not an open relay. Each connection polls — a
+WebSocket read with a 2 ms timeout, then the UDP socket drained
+non-blocking — which is fine for verification and should be revisited for
+deployment.
+
+**Remaining wasm hazard.** `skate2_net::server::run` seeds from
+`SystemTime::now()`. It is the native server's entry point only; a server
+running in a tab would need the same swap the clock got.
+
+### Next: milestone seven
+
+Gameplay frames over the session: the synthetic frame source is milestone
+six's stand-in, replaced by real frames from a session booted in the tab
+alongside the real renderer.
