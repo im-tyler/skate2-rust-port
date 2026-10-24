@@ -7,6 +7,13 @@ This script enforces the one hard rule: the workspace clippy warning total
 may never exceed the recorded baseline, and an intentional drop is
 recorded with `--update` in the same change that caused it.
 
+The total is cargo's own per-target summary — every
+`warning: `<crate>` (<target>) generated N warnings` line, summed over the
+distinct (crate, target) pairs. Raw diagnostic lines are an emission
+artifact (cached units replay text with per-target duplication whose
+multiplicity shifts with the build cache), but the per-target totals are
+stored in the fingerprints and are stable run to run.
+
 Usage:
     python3 tools/clippy_ratchet.py           # enforce against the baseline
     python3 tools/clippy_ratchet.py --update  # record the current (lower) total
@@ -21,9 +28,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "tools" / "clippy-baseline.txt"
 
-# A per-target summary line, not a diagnostic: `warning: `skate2-core` (lib) generated 447 warnings`
-SUMMARY = re.compile(r"^warning: `[^`]+` \(.*\) generated \d+ warnings?")
-PER_CRATE = re.compile(r"^warning: `([^`]+)` \(([^)]*)\) generated (\d+) warnings?")
+# `warning: `skate2-core` (lib) generated 447 warnings` and the replay form
+# `warning: `skate2-core` (lib) generated 447 warnings (200 duplicates)`. A
+# target's own distinct diagnostics are `generated - duplicates`.
+SUMMARY = re.compile(
+    r"^warning: `([^`]+)` \(([^)]*)\) generated (\d+) warnings?(?: \((\d+) duplicates\))?"
+)
 
 
 def count_clippy() -> tuple[int, dict[str, int], str]:
@@ -38,20 +48,16 @@ def count_clippy() -> tuple[int, dict[str, int], str]:
     rustc = subprocess.run(
         ["rustc", "--version"], cwd=ROOT, capture_output=True, text=True, check=True
     ).stdout.strip()
-    total = 0
-    per_crate: dict[str, int] = {}
+    per_target: dict[str, int] = {}
     for line in lines:
-        if not line.startswith("warning:") or SUMMARY.match(line):
-            continue
-        total += 1
-    for line in lines:
-        matched = PER_CRATE.match(line)
+        matched = SUMMARY.match(line)
         if matched:
-            crate, targets, generated = matched.groups()
-            per_crate[f"{crate} ({targets})"] = max(
-                per_crate.get(f"{crate} ({targets})", 0), int(generated)
-            )
-    return total, per_crate, rustc
+            crate, target, generated, duplicates = matched.groups()
+            # A pair can appear twice (fresh and replayed); keep the real total.
+            key = f"{crate} ({target})"
+            distinct = int(generated) - int(duplicates or 0)
+            per_target[key] = max(per_target.get(key, 0), distinct)
+    return sum(per_target.values()), per_target, rustc
 
 
 def read_baseline() -> tuple[int, str]:
@@ -67,24 +73,26 @@ def read_baseline() -> tuple[int, str]:
     return total, rustc
 
 
-def write_baseline(total: int, per_crate: dict[str, int], rustc: str) -> None:
+def write_baseline(total: int, per_target: dict[str, int], rustc: str) -> None:
     body = [
         "# The workspace clippy ratchet baseline, enforced by tools/clippy_ratchet.py.",
-        "# The total may only go down. Record an intentional drop with --update in the",
-        "# same change that caused it. Per-crate lines are context, not enforced.",
+        "# The total is the sum over (crate, target) of `generated N warnings` minus the",
+        "# replayed duplicates — each target's own distinct diagnostics, stable across",
+        "# runs and cache states. It may only go down; record an intentional drop with",
+        "# --update in the same change. Per-target lines are context, not enforced.",
         f"rustc: {rustc.split()[1] if len(rustc.split()) > 1 else rustc}",
         f"total: {total}",
     ]
-    body += [f"#   {name}: {count}" for name, count in sorted(per_crate.items())]
+    body += [f"#   {name}: {count}" for name, count in sorted(per_target.items())]
     BASELINE.write_text("\n".join(body) + "\n", encoding="utf8")
 
 
 def main() -> int:
     update = "--update" in sys.argv[1:]
-    total, per_crate, rustc = count_clippy()
+    total, per_target, rustc = count_clippy()
     if update:
         old, _ = read_baseline() if BASELINE.exists() else (None, "")
-        write_baseline(total, per_crate, rustc)
+        write_baseline(total, per_target, rustc)
         print(f"clippy ratchet: baseline recorded at {total}" + (f" (was {old})" if old else ""))
         return 0
     baseline, baseline_rustc = read_baseline()

@@ -6,25 +6,25 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use skate2_audio::grain_player::GrainData;
+use skate2_audio::player::PlayerFrame;
 use skate2_audio::player::pos3d::CameraMatrix;
 use skate2_audio::player::skateboard::GrainFiles;
-use skate2_audio::player::PlayerFrame;
-use skate2_audio::presentation::{audio_material, multiplier_flags, CollisionInfo, PhysOutView};
+use skate2_audio::presentation::{CollisionInfo, PhysOutView, audio_material, multiplier_flags};
 use skate2_audio::system::{AemsFiles, AudioSystem, GameAudioState, WorldAudioState};
 use skate2_audio::vault::AttribSource;
-use skate2_audio::world::pedestrian::{PedStateOut, PedestrianData};
 use skate2_audio::world::dynamic_object::{DmoSwapFiles, DynamicData};
+use skate2_audio::world::pedestrian::{PedStateOut, PedestrianData};
 use skate2_audio::world::traffic::VehicleData;
 use skate2_core::challenge::attrib_db::AttribDb;
-use skate2_core::ui::music_player::MusicRequest;
 use skate2_core::ui::FeSoundRequest;
+use skate2_core::ui::music_player::MusicRequest;
 use skate2_core::{AudioSkater, SkaterAudioPhysOut};
 use skate2_formats::big::BigEntryKey;
 use skate2_formats::mount::{MountSet, MountedBig};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::sync::atomic::{AtomicBool,Ordering};
 use std::time::Instant;
 
 const MIX_RATE: u32 = 48_000;
@@ -34,9 +34,18 @@ fn game_root(mounts: &MountSet) -> Result<PathBuf, String> {
     let boot = mounts
         .archives()
         .iter()
-        .find(|a| a.data_path().file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("miscboot.big")))
+        .find(|a| {
+            a.data_path()
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("miscboot.big"))
+        })
         .ok_or("audio requires the miscboot mount")?;
-    boot.data_path().parent().and_then(Path::parent).and_then(Path::parent).map(Path::to_path_buf).ok_or_else(|| "invalid Boot archive path".to_owned())
+    boot.data_path()
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "invalid Boot archive path".to_owned())
 }
 
 /// `skater.vlt` as the audio code reads it (`Attrib::Instance::GetAttributePointer`, `mLayoutPtr`).
@@ -44,7 +53,9 @@ struct VaultSource(AttribDb);
 
 impl AttribSource for VaultSource {
     fn attribute(&self, class: u64, collection: u64, key: u64, index: u32) -> Option<Vec<u8>> {
-        self.0.attribute(class, collection, key)?.value_bytes(index as usize)
+        self.0
+            .attribute(class, collection, key)?
+            .value_bytes(index as usize)
     }
 
     fn layout_word(&self, class: u64, collection: u64, index: u32) -> u32 {
@@ -56,15 +67,22 @@ impl AttribSource for VaultSource {
     }
 
     fn layout_text(&self, class: u64, collection: u64, index: u32) -> Option<String> {
-        self.0.layout_text(class, collection, index).map(str::to_owned)
+        self.0
+            .layout_text(class, collection, index)
+            .map(str::to_owned)
     }
 
     fn text(&self, class: u64, collection: u64, key: u64, index: u32) -> Option<String> {
-        self.0.attribute(class, collection, key)?.text(index as usize).map(str::to_owned)
+        self.0
+            .attribute(class, collection, key)?
+            .text(index as usize)
+            .map(str::to_owned)
     }
 
     fn length(&self, class: u64, collection: u64, key: u64) -> u32 {
-        self.0.attribute(class, collection, key).map_or(0, |attribute| attribute.len() as u32)
+        self.0
+            .attribute(class, collection, key)
+            .map_or(0, |attribute| attribute.len() as u32)
     }
 
     fn leaf_collections(&self, class: u64) -> Vec<u64> {
@@ -73,11 +91,20 @@ impl AttribSource for VaultSource {
 }
 
 /// The banks of one `data\audio` splicer archive.
-fn splicer_banks(root: &Path, archive: &str, banks: &[(&str, usize)]) -> Result<Vec<(String, usize, Arc<[u8]>)>, String> {
-    let big = MountedBig::open(root.join("data/audio").join(archive), false).map_err(|e| format!("{archive}: {e}"))?;
+fn splicer_banks(
+    root: &Path,
+    archive: &str,
+    banks: &[(&str, usize)],
+) -> Result<Vec<(String, usize, Arc<[u8]>)>, String> {
+    let big = MountedBig::open(root.join("data/audio").join(archive), false)
+        .map_err(|e| format!("{archive}: {e}"))?;
     banks
         .iter()
-        .map(|&(name, slot)| big.read_path(name).map(|bytes| (name.to_owned(), slot, Arc::from(bytes))).map_err(|e| format!("{name}: {e}")))
+        .map(|&(name, slot)| {
+            big.read_path(name)
+                .map(|bytes| (name.to_owned(), slot, Arc::from(bytes)))
+                .map_err(|e| format!("{name}: {e}"))
+        })
         .collect()
 }
 
@@ -86,12 +113,20 @@ fn splicer_banks(root: &Path, archive: &str, banks: &[(&str, usize)]) -> Result<
 /// the wheels load by name (`AudioAssetManager::SyncLoad`, `FileLoader::SyncLoad`) — the recorded
 /// list, because the browser's byte source cannot enumerate a directory.
 fn grain_files(root: &Path) -> Result<GrainFiles, String> {
-    let big = MountedBig::open(root.join("data/audio/grains.big"), false).map_err(|e| format!("grains.big: {e}"))?;
+    let big = MountedBig::open(root.join("data/audio/grains.big"), false)
+        .map_err(|e| format!("grains.big: {e}"))?;
     let mut files = GrainFiles::new();
     for entry in &big.archive().entries {
-        let BigEntryKey::Name(name) = &entry.key else { continue };
+        let BigEntryKey::Name(name) = &entry.key else {
+            continue;
+        };
         let bytes = big.read_entry(entry).map_err(|e| format!("{name}: {e}"))?;
-        files.insert(name.to_lowercase(), GrainData { bytes: Arc::from(bytes) });
+        files.insert(
+            name.to_lowercase(),
+            GrainData {
+                bytes: Arc::from(bytes),
+            },
+        );
     }
     for name in skate2_audio::load::LOOSE_GRAIN_FILES {
         // The old directory walk skipped a missing file; keep that: a dump
@@ -110,49 +145,82 @@ fn grain_files(root: &Path) -> Result<GrainFiles, String> {
 
 /// `GetHOMBank` 0x824e6a08's banks (`sHOMBankNames`), in their order.
 fn hom_banks(root: &Path) -> Result<Vec<Arc<[u8]>>, String> {
-    let big = MountedBig::open(root.join("data/audio/splicercollision.big"), false).map_err(|e| format!("splicercollision.big: {e}"))?;
-    skate2_audio::main_objects::HOM_BANK_NAMES.iter().map(|&name| big.read_path(name).map(Arc::from).map_err(|e| format!("{name}: {e}"))).collect()
+    let big = MountedBig::open(root.join("data/audio/splicercollision.big"), false)
+        .map_err(|e| format!("splicercollision.big: {e}"))?;
+    skate2_audio::main_objects::HOM_BANK_NAMES
+        .iter()
+        .map(|&name| {
+            big.read_path(name)
+                .map(Arc::from)
+                .map_err(|e| format!("{name}: {e}"))
+        })
+        .collect()
 }
 
 fn big_file(root: &Path, big: &str, name: &str) -> Result<Vec<u8>, String> {
-    let archive = MountedBig::open(root.join("data/audio").join(big), false).map_err(|e| format!("{big}: {e}"))?;
+    let archive = MountedBig::open(root.join("data/audio").join(big), false)
+        .map_err(|e| format!("{big}: {e}"))?;
     let entry = archive
         .archive()
         .entries
         .iter()
         .find(|entry| matches!(&entry.key, BigEntryKey::Name(n) if n.eq_ignore_ascii_case(name)))
         .ok_or_else(|| format!("{big}: no {name}"))?;
-    archive.read_entry(entry).map_err(|e| format!("{name}: {e}"))
+    archive
+        .read_entry(entry)
+        .map_err(|e| format!("{name}: {e}"))
 }
 
 fn aems_files(root: &Path) -> Result<AemsFiles, String> {
     let mut files = AemsFiles::default();
     for name in skate2_audio::load::EMITTER_DATA_FILES {
-        let bytes = std::fs::read(skate2_formats::host_path::on_disk(&root.join("data/audio").join(name))).map_err(|e| format!("{name}: {e}"))?;
-        files.emitters.data_files.push((format!("data\\audio\\{name}"), bytes));
+        let bytes = std::fs::read(skate2_formats::host_path::on_disk(
+            &root.join("data/audio").join(name),
+        ))
+        .map_err(|e| format!("{name}: {e}"))?;
+        files
+            .emitters
+            .data_files
+            .push((format!("data\\audio\\{name}"), bytes));
     }
     // The banks the emitter system's swap slots load from `data\audio\emitters.big`.
-    let emitters = MountedBig::open(root.join("data/audio/emitters.big"), false).map_err(|e| format!("emitters.big: {e}"))?;
+    let emitters = MountedBig::open(root.join("data/audio/emitters.big"), false)
+        .map_err(|e| format!("emitters.big: {e}"))?;
     for entry in &emitters.archive().entries {
         if let BigEntryKey::Name(name) = &entry.key {
-            let bytes = emitters.read_entry(entry).map_err(|e| format!("{name}: {e}"))?;
-            files.emitters.banks.push((name.to_string(), Arc::from(bytes)));
+            let bytes = emitters
+                .read_entry(entry)
+                .map_err(|e| format!("{name}: {e}"))?;
+            files
+                .emitters
+                .banks
+                .push((name.to_string(), Arc::from(bytes)));
         }
     }
     for (big, name) in skate2_audio::load::AEMS_INTERFACES {
-        files.interfaces.push((name.to_owned(), big_file(root, big, name)?));
+        files
+            .interfaces
+            .push((name.to_owned(), big_file(root, big, name)?));
     }
     for (big, name) in skate2_audio::load::AEMS_BANKS {
-        files.banks.push((name.to_owned(), Arc::from(big_file(root, big, name)?)));
+        files
+            .banks
+            .push((name.to_owned(), Arc::from(big_file(root, big, name)?)));
     }
     for (big, name) in skate2_audio::load::DMO_BANKS {
-        files.banks.push((name.to_owned(), Arc::from(big_file(root, big, name)?)));
+        files
+            .banks
+            .push((name.to_owned(), Arc::from(big_file(root, big, name)?)));
     }
     for (big, name) in skate2_audio::load::MOMENTS_BANKS {
-        files.banks.push((name.to_owned(), Arc::from(big_file(root, big, name)?)));
+        files
+            .banks
+            .push((name.to_owned(), Arc::from(big_file(root, big, name)?)));
     }
     for (big, name) in skate2_audio::load::VEHICLE_BANKS {
-        files.banks.push((name.to_owned(), Arc::from(big_file(root, big, name)?)));
+        files
+            .banks
+            .push((name.to_owned(), Arc::from(big_file(root, big, name)?)));
     }
     Ok(files)
 }
@@ -161,7 +229,8 @@ fn aems_files(root: &Path) -> Result<AemsFiles, String> {
 /// `aud_dynamicobjectrandom` splice banks, so its `big|Moveable_*` paths never resolve.
 fn dmo_swap_files(mounts: &MountSet) -> Result<DmoSwapFiles, String> {
     let root = game_root(mounts)?;
-    let big = MountedBig::open(root.join("data/audio/splicerdmo.big"), false).map_err(|e| format!("splicerdmo.big: {e}"))?;
+    let big = MountedBig::open(root.join("data/audio/splicerdmo.big"), false)
+        .map_err(|e| format!("splicerdmo.big: {e}"))?;
     let mut files = DmoSwapFiles::default();
     for entry in &big.archive().entries {
         if let BigEntryKey::Name(name) = &entry.key {
@@ -176,10 +245,32 @@ fn dmo_swap_files(mounts: &MountSet) -> Result<DmoSwapFiles, String> {
 /// and collision splicer banks, `data\audio\MixMapSK8.mxb`, `skater.vlt` and its `fe` collections.
 fn load_system(mounts: &MountSet) -> Result<(AudioSystem, HashMap<String, u64>), String> {
     let root = game_root(mounts)?;
-    let banks = MountedBig::open(root.join("data/audio/splicerfe.big"), false).map_err(|e| e.to_string())?;
-    let fe_bank: Arc<[u8]> = banks.read_path("Sk82_FE.bnk").map_err(|e| format!("Sk82_FE.bnk: {e}"))?.into();
-    let menu_bank: Arc<[u8]> = banks.read_path("sk8_menu.bnk").map_err(|e| format!("sk8_menu.bnk: {e}"))?.into();
-    let inputs = skate2_audio::load::AudioInputs {
+    let inputs = audio_inputs(
+        &root,
+        Arc::new(skate2_audio::rwac::stream_pool::GameStreamFiles::new(
+            root.clone(),
+        )),
+    )?;
+    let db = AttribDb::load(mounts, &["data\\db\\skater.vlt"]).map_err(|e| e.to_string())?;
+    skate2_audio::load::load(inputs, Box::new(VaultSource(db)))
+}
+
+/// Every byte input read from the game root, with the caller's stream reader.
+fn audio_inputs(
+    root: &Path,
+    stream_files: Arc<dyn skate2_audio::rwac::stream_pool::StreamFiles>,
+) -> Result<skate2_audio::load::AudioInputs, String> {
+    let banks = MountedBig::open(root.join("data/audio/splicerfe.big"), false)
+        .map_err(|e| e.to_string())?;
+    let fe_bank: Arc<[u8]> = banks
+        .read_path("Sk82_FE.bnk")
+        .map_err(|e| format!("Sk82_FE.bnk: {e}"))?
+        .into();
+    let menu_bank: Arc<[u8]> = banks
+        .read_path("sk8_menu.bnk")
+        .map_err(|e| format!("sk8_menu.bnk: {e}"))?
+        .into();
+    Ok(skate2_audio::load::AudioInputs {
         fe_bank,
         menu_bank,
         skateboard_banks: splicer_banks(
@@ -199,13 +290,8 @@ fn load_system(mounts: &MountSet) -> Result<(AudioSystem, HashMap<String, u64>),
         .map_err(|e| format!("MixMapSK8.mxb: {e}"))?,
         grains: grain_files(&root)?,
         aems: aems_files(&root)?,
-        // `rw::core::filesys` for the streamed ambience beds and `ambienceresident.big`.
-        stream_files: Arc::new(skate2_audio::rwac::stream_pool::GameStreamFiles::new(
-            root.clone(),
-        )),
-    };
-    let db = AttribDb::load(mounts, &["data\\db\\skater.vlt"]).map_err(|e| e.to_string())?;
-    skate2_audio::load::load(inputs, Box::new(VaultSource(db)))
+        stream_files,
+    })
 }
 
 /// The core's `PhysOut` copy as the audio presentation reads it.
@@ -360,7 +446,13 @@ fn pedestrian_data(pedestrian: &skate2_core::AudioPedestrian) -> PedestrianData 
         target_greet_character: pedestrian.target_greet_character,
         flags: pedestrian.flags,
     };
-    PedestrianData::from_state_out(pedestrian.id, out, pedestrian.audio_character, pedestrian.distance, pedestrian.local_to_world)
+    PedestrianData::from_state_out(
+        pedestrian.id,
+        out,
+        pedestrian.audio_character,
+        pedestrian.distance,
+        pedestrian.local_to_world,
+    )
 }
 
 /// `AudioPresentation::DoSimSubmit`'s `VehicleData` of a car the core found.
@@ -389,14 +481,18 @@ fn dynamic_data(object: &skate2_core::AudioDynamicObject) -> DynamicData {
         angular_vel: object.angular_velocity,
         collision_force: object.contact.map_or(0.0, |(force, _)| force),
         on_ground: object.contact.is_some(),
-        collision_material: object.contact.map_or(0, |(_, surface)| audio_material(surface)),
+        collision_material: object
+            .contact
+            .map_or(0, |(_, surface)| audio_material(surface)),
         on_side: object.on_side,
         bounds_center: Some(object.bounds_center),
     }
 }
 
 fn lock(system: &Mutex<AudioSystem>) -> MutexGuard<'_, AudioSystem> {
-    system.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    system
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The audio clock the scenes read (`AudioCore::GetSystemTime` with `kNISUsesTheAudioClock`).
@@ -420,7 +516,9 @@ struct DeviceClockState {
 
 impl DeviceClock {
     fn lock(&self) -> MutexGuard<'_, DeviceClockState> {
-        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// A callback handing the device `seconds` of frames.
@@ -433,14 +531,17 @@ impl DeviceClock {
 
     fn now(&self) -> f64 {
         let state = self.lock();
-        state.handed + state.at.map_or(0.0, |at| at.elapsed().as_secs_f64().min(state.callback))
+        state.handed
+            + state
+                .at
+                .map_or(0.0, |at| at.elapsed().as_secs_f64().min(state.callback))
     }
 }
 
 /// Converts the 48 kHz stereo mix to the device's rate and channel count.
 struct Output {
     system: Arc<Mutex<AudioSystem>>,
-    exporting:Arc<AtomicBool>,
+    exporting: Arc<AtomicBool>,
     pending: VecDeque<f32>,
     block: Vec<f32>,
     step: f64,
@@ -455,12 +556,17 @@ impl Output {
     fn next_mix_frame(&mut self) -> [f32; 2] {
         if self.pending.len() < 2 {
             self.block.clear();
-            let mut system=lock(&self.system);
-            if self.exporting.load(Ordering::Acquire){return [0.;2];}
+            let mut system = lock(&self.system);
+            if self.exporting.load(Ordering::Acquire) {
+                return [0.; 2];
+            }
             system.render_stereo(&mut self.block);
             self.pending.extend(self.block.iter().copied());
         }
-        [self.pending.pop_front().unwrap_or(0.0), self.pending.pop_front().unwrap_or(0.0)]
+        [
+            self.pending.pop_front().unwrap_or(0.0),
+            self.pending.pop_front().unwrap_or(0.0),
+        ]
     }
 
     fn next_frame(&mut self) -> [f32; 2] {
@@ -474,14 +580,26 @@ impl Output {
         }
         let t = self.position as f32;
         self.position += self.step;
-        [self.previous[0] + (self.current[0] - self.previous[0]) * t, self.previous[1] + (self.current[1] - self.previous[1]) * t]
+        [
+            self.previous[0] + (self.current[0] - self.previous[0]) * t,
+            self.previous[1] + (self.current[1] - self.previous[1]) * t,
+        ]
     }
 
-    fn fill<T: cpal::SizedSample + cpal::FromSample<f32>>(&mut self, data: &mut [T], channels: usize) {
-        self.clock.callback((data.len() / channels.max(1)) as f64 / self.device_rate);
+    fn fill<T: cpal::SizedSample + cpal::FromSample<f32>>(
+        &mut self,
+        data: &mut [T],
+        channels: usize,
+    ) {
+        self.clock
+            .callback((data.len() / channels.max(1)) as f64 / self.device_rate);
         if self.exporting.load(Ordering::Acquire) {
-            self.pending.clear();self.previous=[0.;2];self.current=[0.;2];self.position=1.;
-            data.fill(T::from_sample(0.));return;
+            self.pending.clear();
+            self.previous = [0.; 2];
+            self.current = [0.; 2];
+            self.position = 1.;
+            data.fill(T::from_sample(0.));
+            return;
         }
         for frame in data.chunks_mut(channels) {
             let [left, right] = self.next_frame();
@@ -498,10 +616,19 @@ impl Output {
     }
 }
 
-fn build_stream<T: cpal::SizedSample + cpal::FromSample<f32>>(device: &cpal::Device, config: cpal::StreamConfig, mut output: Output) -> Result<cpal::Stream, String> {
+fn build_stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    mut output: Output,
+) -> Result<cpal::Stream, String> {
     let channels = usize::from(config.channels);
     device
-        .build_output_stream(config, move |data: &mut [T], _: &cpal::OutputCallbackInfo| output.fill(data, channels), |error| eprintln!("audio output: {error}"), None)
+        .build_output_stream(
+            config,
+            move |data: &mut [T], _: &cpal::OutputCallbackInfo| output.fill(data, channels),
+            |error| eprintln!("audio output: {error}"),
+            None,
+        )
         .map_err(|e| e.to_string())
 }
 
@@ -521,8 +648,8 @@ enum AudioOutput {
 
 pub(crate) struct GameAudio {
     system: Arc<Mutex<AudioSystem>>,
-    exporting:Arc<AtomicBool>,
-    export_pending:VecDeque<f32>,
+    exporting: Arc<AtomicBool>,
+    export_pending: VecDeque<f32>,
     globals: HashMap<String, u64>,
     /// The last skaters the session published: `AudioPresentation` keeps them on frames that
     /// publish none (a paused simulation).
@@ -543,7 +670,9 @@ struct GameAudioInterface {
 
 impl skate2_core::nis::audio::AudioInterface for GameAudioInterface {
     fn system_time(&self) -> f64 {
-        self.clock.as_ref().map_or_else(|| lock(&self.system).system_time(), |clock| clock.now())
+        self.clock
+            .as_ref()
+            .map_or_else(|| lock(&self.system).system_time(), |clock| clock.now())
     }
 
     fn queue_nis_post(&self, id: i32) {
@@ -572,8 +701,19 @@ impl skate2_core::nis::audio::AudioInterface for GameAudioInterface {
         lock(&self.system).is_speech_queued(character, id)
     }
 
-    fn notify_nis_playback_start(&self, scene_type: i32, special_flags: i32, is_replay_nis: bool, scene_length: f32) {
-        lock(&self.system).notify_nis_playback_start(scene_type, special_flags, is_replay_nis, scene_length);
+    fn notify_nis_playback_start(
+        &self,
+        scene_type: i32,
+        special_flags: i32,
+        is_replay_nis: bool,
+        scene_length: f32,
+    ) {
+        lock(&self.system).notify_nis_playback_start(
+            scene_type,
+            special_flags,
+            is_replay_nis,
+            scene_length,
+        );
     }
 
     fn notify_nis_playback_finish(&self) {
@@ -594,9 +734,24 @@ impl skate2_core::nis::audio::AudioInterface for GameAudioInterface {
         lock(&self.system).play_camera_man_csis_event(function);
     }
 
-    fn trigger_mission_music(&self, trigger: i32, challenge: u64, challenge_type: i32, race_tuning: u64) {
-        trace_speech(format_args!("trigger mission music {trigger} for {challenge:#x} (type {challenge_type}, race tuning {race_tuning:#x})"));
-        lock(&self.system).trigger_mission_music(trigger, skate2_audio::system::MissionMusic { challenge, challenge_type, race_tuning });
+    fn trigger_mission_music(
+        &self,
+        trigger: i32,
+        challenge: u64,
+        challenge_type: i32,
+        race_tuning: u64,
+    ) {
+        trace_speech(format_args!(
+            "trigger mission music {trigger} for {challenge:#x} (type {challenge_type}, race tuning {race_tuning:#x})"
+        ));
+        lock(&self.system).trigger_mission_music(
+            trigger,
+            skate2_audio::system::MissionMusic {
+                challenge,
+                challenge_type,
+                race_tuning,
+            },
+        );
     }
 
     fn restart_challenge(&self, retry: bool) {
@@ -633,26 +788,50 @@ impl GameAudio {
         let system = Arc::new(Mutex::new(system));
         let dmo_swap_files = Arc::new(dmo_swap_files(mounts)?);
         if let Some(path) = std::env::var_os("SKATE2_AUDIO_DUMP") {
-            let file = std::fs::File::create(&path).map_err(|e| format!("SKATE2_AUDIO_DUMP: {e}"))?;
-            eprintln!("audio: {} fe sounds, mix dumped to {}", globals.len(), PathBuf::from(&path).display());
-            let dump = Dump { file: std::io::BufWriter::new(file), simulated: 0.0, mixed: 0.0, block: Vec::new() };
-            return Ok(Self { system, globals, skaters: Vec::new(), dmo_swap_files, output: AudioOutput::Dump(dump), clock: None,
-                exporting:Arc::new(AtomicBool::new(false)),export_pending:VecDeque::new() });
+            let file =
+                std::fs::File::create(&path).map_err(|e| format!("SKATE2_AUDIO_DUMP: {e}"))?;
+            eprintln!(
+                "audio: {} fe sounds, mix dumped to {}",
+                globals.len(),
+                PathBuf::from(&path).display()
+            );
+            let dump = Dump {
+                file: std::io::BufWriter::new(file),
+                simulated: 0.0,
+                mixed: 0.0,
+                block: Vec::new(),
+            };
+            return Ok(Self {
+                system,
+                globals,
+                skaters: Vec::new(),
+                dmo_swap_files,
+                output: AudioOutput::Dump(dump),
+                clock: None,
+                exporting: Arc::new(AtomicBool::new(false)),
+                export_pending: VecDeque::new(),
+            });
         }
 
         let host = cpal::default_host();
-        let device = host.default_output_device().ok_or("no audio output device")?;
+        let device = host
+            .default_output_device()
+            .ok_or("no audio output device")?;
         let supported = device.default_output_config().map_err(|e| e.to_string())?;
         let config = supported.config();
         let step = f64::from(MIX_RATE) / f64::from(config.sample_rate);
         let clock = Arc::new(DeviceClock::default());
-        let exporting=Arc::new(AtomicBool::new(false));
+        let exporting = Arc::new(AtomicBool::new(false));
         let output = Output {
             system: Arc::clone(&system),
-            exporting:Arc::clone(&exporting),
+            exporting: Arc::clone(&exporting),
             pending: VecDeque::new(),
             block: Vec::new(),
-            step: if config.sample_rate == MIX_RATE { 1.0 } else { step },
+            step: if config.sample_rate == MIX_RATE {
+                1.0
+            } else {
+                step
+            },
             position: 1.0,
             previous: [0.0; 2],
             current: [0.0; 2],
@@ -683,13 +862,25 @@ impl GameAudio {
             config.channels,
             supported.sample_format()
         );
-        Ok(Self { system, globals, skaters: Vec::new(), dmo_swap_files, output: AudioOutput::Device { _stream: stream }, clock: Some(clock),exporting,export_pending:VecDeque::new() })
+        Ok(Self {
+            system,
+            globals,
+            skaters: Vec::new(),
+            dmo_swap_files,
+            output: AudioOutput::Device { _stream: stream },
+            clock: Some(clock),
+            exporting,
+            export_pending: VecDeque::new(),
+        })
     }
 
     /// The audio system as the career's scenes and challenge audio manager call it
     /// (`IAudioInterface`).
     pub(crate) fn audio_interface(&self) -> Arc<dyn skate2_core::nis::audio::AudioInterface> {
-        Arc::new(GameAudioInterface { system: Arc::clone(&self.system), clock: self.clock.clone() })
+        Arc::new(GameAudioInterface {
+            system: Arc::clone(&self.system),
+            clock: self.clock.clone(),
+        })
     }
 
     /// `IAudioInterface::PlayNISSfx`.
@@ -713,7 +904,12 @@ impl GameAudio {
     }
 
     /// A movie's `AudioRenderer_Rwac` (`Init`) over the decoded sound its reader fills.
-    pub(crate) fn movie_init(&self, sample_rate: u32, channels: u8, sound: skate2_audio::movie::MovieSound) -> bool {
+    pub(crate) fn movie_init(
+        &self,
+        sample_rate: u32,
+        channels: u8,
+        sound: skate2_audio::movie::MovieSound,
+    ) -> bool {
         lock(&self.system).movie_init(sample_rate, channels, sound)
     }
 
@@ -742,25 +938,45 @@ impl GameAudio {
     /// globals exist, and other names are no-ops natively.
     pub(crate) fn request(&self, request: FeSoundRequest) {
         match request {
-            FeSoundRequest::PlayKey(key)=>{lock(&self.system).global_fe_play_sound(key,false);return;},
-            FeSoundRequest::LoopKey(key)=>{lock(&self.system).global_fe_play_sound(key,true);return;},
-            FeSoundRequest::StopKey(key)=>{lock(&self.system).global_fe_stop_sound(key);return;},
-            _=>{}
+            FeSoundRequest::PlayKey(key) => {
+                lock(&self.system).global_fe_play_sound(key, false);
+                return;
+            }
+            FeSoundRequest::LoopKey(key) => {
+                lock(&self.system).global_fe_play_sound(key, true);
+                return;
+            }
+            FeSoundRequest::StopKey(key) => {
+                lock(&self.system).global_fe_stop_sound(key);
+                return;
+            }
+            _ => {}
         }
         let (verb, global) = match request {
-            FeSoundRequest::PlayKey(_)|FeSoundRequest::LoopKey(_)|FeSoundRequest::StopKey(_)=>unreachable!(),
+            FeSoundRequest::PlayKey(_)
+            | FeSoundRequest::LoopKey(_)
+            | FeSoundRequest::StopKey(_) => unreachable!(),
             FeSoundRequest::Play(global) => ("play", global),
             FeSoundRequest::Loop(global) => ("loop", global),
             FeSoundRequest::Stop(global) => ("stop", global),
         };
         let key = self.globals.get(global).copied();
         if let Some(elapsed) = skate2_audio::splicer::trace_elapsed() {
-            eprintln!("{elapsed:9.3} audio {verb} {global}{}", if key.is_some() { "" } else { " (no fe collection)" });
+            eprintln!(
+                "{elapsed:9.3} audio {verb} {global}{}",
+                if key.is_some() {
+                    ""
+                } else {
+                    " (no fe collection)"
+                }
+            );
         }
         if let Some(key) = key {
             let mut system = lock(&self.system);
             match request {
-                FeSoundRequest::PlayKey(_)|FeSoundRequest::LoopKey(_)|FeSoundRequest::StopKey(_)=>unreachable!(),
+                FeSoundRequest::PlayKey(_)
+                | FeSoundRequest::LoopKey(_)
+                | FeSoundRequest::StopKey(_) => unreachable!(),
                 FeSoundRequest::Play(_) => system.global_fe_play_sound(key, false),
                 FeSoundRequest::Loop(_) => system.global_fe_play_sound(key, true),
                 FeSoundRequest::Stop(_) => system.global_fe_stop_sound(key),
@@ -788,7 +1004,10 @@ impl GameAudio {
     /// `GetCurrentMusicPlayerSongID` and the playlist index the update left.
     pub(crate) fn music_player_song(&self) -> (u32, i32) {
         let system = lock(&self.system);
-        (system.current_music_player_song_id(), system.music_player_song_index())
+        (
+            system.current_music_player_song_id(),
+            system.music_player_song_index(),
+        )
     }
 
     /// The song the music system's `UpdateChyron` displayed since the last call.
@@ -798,7 +1017,12 @@ impl GameAudio {
 
     /// One game frame of `AudioSystem::Update`: the world (camera, the local skater's
     /// `FillSkaterData` as player 0) when the session has one, else the front-end branch.
-    pub(crate) fn update(&mut self, dt: f32, state: GameAudioState, world: Option<AudioWorldInput>) {
+    pub(crate) fn update(
+        &mut self,
+        dt: f32,
+        state: GameAudioState,
+        world: Option<AudioWorldInput>,
+    ) {
         if let Some(world) = world.as_ref() {
             if world.front_end {
                 self.skaters = world.skaters.clone().unwrap_or_default();
@@ -826,19 +1050,35 @@ impl GameAudio {
                 .collect();
             // DoSimSubmit keeps the last local skater's `PhysOut` for the global bail and
             // multiplier data.
-            let local = self.skaters.iter().rev().find(|skater| skater.local).map(|skater| &skater.phys_out);
+            let local = self
+                .skaters
+                .iter()
+                .rev()
+                .find(|skater| skater.local)
+                .map(|skater| &skater.phys_out);
             WorldAudioState {
                 chase: (world.security.chasers, world.security.flags),
                 bodyguard: world.security.bodyguard,
                 frame: world.frame,
                 sim_tick: world.frame,
-                camera: CameraMatrix { at: [x, y, z, 0.0], position: [px, py, pz, 1.0] },
-                player: PlayerFrame { skaters, game_speed: world.game_speed, is_rewinding: world.is_rewinding },
+                camera: CameraMatrix {
+                    at: [x, y, z, 0.0],
+                    position: [px, py, pz, 1.0],
+                },
+                player: PlayerFrame {
+                    skaters,
+                    game_speed: world.game_speed,
+                    is_rewinding: world.is_rewinding,
+                },
                 hom_bail: local.is_some_and(|s| s.hom_bail_in_progress && s.hom_effect_enabled),
                 // `VDReader::ReadData` 0x827fdd78: the bail record `VDWriter::_PrepareBailData`
                 // 0x827fcd40 writes unless the wipeout duration is at most 0 (a NaN records).
-                bail: local.is_some_and(|skater| skater.overall_wipeout_duration > 0.0 || skater.overall_wipeout_duration.is_nan()),
-                bail_severity: local.map_or(0.0, |skater| skater.contact_force_total_during_wipeout),
+                bail: local.is_some_and(|skater| {
+                    skater.overall_wipeout_duration > 0.0
+                        || skater.overall_wipeout_duration.is_nan()
+                }),
+                bail_severity: local
+                    .map_or(0.0, |skater| skater.contact_force_total_during_wipeout),
                 out_of_bounds: world.out_of_boundary_amount.is_some(),
                 out_of_bounds_amount: world.out_of_boundary_amount.unwrap_or(0.0),
                 fade_info: world.fade_amount,
@@ -857,15 +1097,28 @@ impl GameAudio {
         if std::env::var_os("SKATE2_TRACE_REPLAY_AUDIO").is_some()
             && let Some(world) = &world
         {
-            let forces: f32 = self.skaters.iter().filter(|s| s.local)
-                .flat_map(|s| s.phys_out.averaged_skeleton_collision_info.contact_force).sum();
-            eprintln!("audio frame={} replay={} speed={} rewind={} bail={} hom={} contacts={forces} skaters={}",
-                world.frame, system.state.presentation.is_some_and(|p|p.0), world.player.game_speed,
-                world.player.is_rewinding, world.bail, world.hom_bail, world.player.skaters.len());
+            let forces: f32 = self
+                .skaters
+                .iter()
+                .filter(|s| s.local)
+                .flat_map(|s| s.phys_out.averaged_skeleton_collision_info.contact_force)
+                .sum();
+            eprintln!(
+                "audio frame={} replay={} speed={} rewind={} bail={} hom={} contacts={forces} skaters={}",
+                world.frame,
+                system.state.presentation.is_some_and(|p| p.0),
+                world.player.game_speed,
+                world.player.is_rewinding,
+                world.bail,
+                world.hom_bail,
+                world.player.skaters.len()
+            );
         }
         system.world = world;
         system.update(dt);
-        if let AudioOutput::Dump(dump) = &mut self.output && !self.exporting.load(Ordering::Acquire) {
+        if let AudioOutput::Dump(dump) = &mut self.output
+            && !self.exporting.load(Ordering::Acquire)
+        {
             use std::io::Write;
             dump.simulated += f64::from(dt);
             while dump.mixed < dump.simulated {
@@ -881,26 +1134,36 @@ impl GameAudio {
         }
     }
 
-    pub(crate) fn exporting(&self)->bool {self.exporting.load(Ordering::Acquire)}
+    pub(crate) fn exporting(&self) -> bool {
+        self.exporting.load(Ordering::Acquire)
+    }
     pub(crate) fn begin_export(&mut self) {
-        self.exporting.store(true,Ordering::Release);
+        self.exporting.store(true, Ordering::Release);
         self.export_pending.clear();
-        let mut system=lock(&self.system);
+        let mut system = lock(&self.system);
         // The confirmation click and frontend loops do not belong to the clip.
-        for key in self.globals.values() {system.global_fe_stop_sound(*key);}
+        for key in self.globals.values() {
+            system.global_fe_stop_sound(*key);
+        }
     }
     pub(crate) fn end_export(&mut self) {
-        self.export_pending.clear();self.exporting.store(false,Ordering::Release);
+        self.export_pending.clear();
+        self.exporting.store(false, Ordering::Release);
     }
     /// Exactly 800 stereo samples per 60 Hz video frame, using the ordinary
     /// recorded skater/world audio and RWAC mixer, independent of device rate
     /// and the time spent rendering or streaming.
-    pub(crate) fn export_frame(&mut self,state:GameAudioState,world:Option<AudioWorldInput>)->Vec<f32> {
-        self.update(1./60.,state,world);
-        let samples=crate::media_encoder::AUDIO_FRAMES*2;
-        let mut system=lock(&self.system);
-        while self.export_pending.len()<samples {
-            let mut block=Vec::new();system.render_stereo(&mut block);
+    pub(crate) fn export_frame(
+        &mut self,
+        state: GameAudioState,
+        world: Option<AudioWorldInput>,
+    ) -> Vec<f32> {
+        self.update(1. / 60., state, world);
+        let samples = crate::media_encoder::AUDIO_FRAMES * 2;
+        let mut system = lock(&self.system);
+        while self.export_pending.len() < samples {
+            let mut block = Vec::new();
+            system.render_stereo(&mut block);
             self.export_pending.extend(block);
         }
         self.export_pending.drain(..samples).collect()
@@ -912,22 +1175,53 @@ mod tests {
     use super::*;
     use skate2_formats::mount::SKATE2_ARCHIVES;
 
+    /// The oracle's system: the same inputs, but the fixed seeds and absent
+    /// streams of `skate2_audio::oracle` — the pinned, stream-free render the tab
+    /// must reproduce (`docs/WEB_PORT_M6_PLAN.md`, phase 1c).
+    fn oracle_load_system(
+        mounts: &MountSet,
+    ) -> Result<(AudioSystem, HashMap<String, u64>), String> {
+        let root = game_root(mounts)?;
+        let inputs = audio_inputs(&root, Arc::new(skate2_audio::oracle::AbsentStreams))?;
+        let db = AttribDb::load(mounts, &["data\\db\\skater.vlt"]).map_err(|e| e.to_string())?;
+        skate2_audio::load::load_with_seeds(
+            inputs,
+            Box::new(VaultSource(db)),
+            skate2_audio::oracle::ORACLE_SEEDS,
+        )
+    }
+
+    /// Recorded once (2026-10-23, macOS aarch64, rustc 1.99.0, the NTSC dump):
+    /// the pause-menu press render of `skate2_audio::oracle`, seeds and streams pinned.
+    const PAUSE_MENU_ORACLE_HASH: u64 = 0x76d0_19a2_c241_ba4e;
+
     #[test]
     #[ignore = "requires external SKATE2_GAME_ROOT"]
     fn pause_menu_sound_renders() {
         let game = PathBuf::from(std::env::var_os("SKATE2_GAME_ROOT").unwrap());
         let mut mounts = MountSet::new();
         for spec in SKATE2_ARCHIVES.iter().take(4) {
-            mounts.push(MountedBig::open(spec.path_under(&game), spec.use_external_header).unwrap());
+            mounts
+                .push(MountedBig::open(spec.path_under(&game), spec.use_external_header).unwrap());
         }
         let (mut system, globals) = load_system(&mounts).unwrap();
-        let unresolved: Vec<_> = globals.iter().filter(|(_, key)| system.fe_sound(**key).is_none()).map(|(name, _)| name.clone()).collect();
-        assert!(unresolved.is_empty(), "globals without an fe collection: {unresolved:?}");
+        let unresolved: Vec<_> = globals
+            .iter()
+            .filter(|(_, key)| system.fe_sound(**key).is_none())
+            .map(|(name, _)| name.clone())
+            .collect();
+        assert!(
+            unresolved.is_empty(),
+            "globals without an fe collection: {unresolved:?}"
+        );
         // `pause_menu` itself has Volume 0.0 in skater.vlt; the press sound is the audible one.
         let key = globals["FE_SOUND_PAUSE_MENU_PRESS"];
         let sound = system.fe_sound(key).unwrap().clone();
         eprintln!("FE_SOUND_PAUSE_MENU_PRESS = {sound:?}");
-        system.state = GameAudioState { hud_state: skate2_audio::system::hud_state::FREE_SKATE, ..GameAudioState::default() };
+        system.state = GameAudioState {
+            hud_state: skate2_audio::system::hud_state::FREE_SKATE,
+            ..GameAudioState::default()
+        };
         system.global_fe_play_sound(key, false);
         let mut stereo = Vec::new();
         let mut mixed = 0.0f64;
@@ -949,13 +1243,43 @@ mod tests {
     /// `Goto_m_1a_01_goto_slappys_outro_1`'s start (`ScenePlayer::AudioQueueForStart`): the
     /// scene's post and the cameraman's line, both 5008, buffer in the 'Spch' stream pool of a
     /// system made as the game makes it.
+    /// The oracle of `docs/WEB_PORT_M6_PLAN.md` phase 1c: the pause-menu press
+    /// render with the seeds and streams pinned — stable across two builds of
+    /// the system in one run, and equal to the recorded hash. The frame count
+    /// is loop arithmetic; this hash is the proof.
+    #[test]
+    #[ignore = "requires external SKATE2_GAME_ROOT"]
+    fn pause_menu_render_oracle_is_pinned() {
+        let game = PathBuf::from(std::env::var_os("SKATE2_GAME_ROOT").unwrap());
+        let mut mounts = MountSet::new();
+        for spec in SKATE2_ARCHIVES.iter().take(4) {
+            mounts
+                .push(MountedBig::open(spec.path_under(&game), spec.use_external_header).unwrap());
+        }
+        let (mut first, globals) = oracle_load_system(&mounts).unwrap();
+        let (mut second, _) = oracle_load_system(&mounts).unwrap();
+        let key = globals["FE_SOUND_PAUSE_MENU_PRESS"];
+        let hash = skate2_audio::oracle::pause_menu_press_render(&mut first, key);
+        let repeat = skate2_audio::oracle::pause_menu_press_render(&mut second, key);
+        eprintln!("pause-menu oracle hash: {hash:#018x}");
+        assert_eq!(
+            hash, repeat,
+            "the pinned, stream-free render must be stable across builds"
+        );
+        assert_eq!(
+            hash, PAUSE_MENU_ORACLE_HASH,
+            "the recorded oracle (macOS aarch64, rustc 1.99.0, NTSC dump)"
+        );
+    }
+
     #[test]
     #[ignore = "requires external SKATE2_GAME_ROOT"]
     fn a_scenes_post_and_line_buffer() {
         let game = PathBuf::from(std::env::var_os("SKATE2_GAME_ROOT").unwrap());
         let mut mounts = MountSet::new();
         for spec in SKATE2_ARCHIVES.iter().take(4) {
-            mounts.push(MountedBig::open(spec.path_under(&game), spec.use_external_header).unwrap());
+            mounts
+                .push(MountedBig::open(spec.path_under(&game), spec.use_external_header).unwrap());
         }
         let (mut system, _) = load_system(&mounts).unwrap();
         system.queue_nis_post(5008);
@@ -974,10 +1298,26 @@ mod tests {
     }
 
     fn write_wav(path: &std::ffi::OsStr, stereo: &[f32]) {
-        let data: Vec<u8> = stereo.iter().flat_map(|x| ((x.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes()).collect();
+        let data: Vec<u8> = stereo
+            .iter()
+            .flat_map(|x| ((x.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes())
+            .collect();
         let mut wav = Vec::new();
-        for chunk in [&b"RIFF"[..], &(36 + data.len() as u32).to_le_bytes(), b"WAVEfmt ", &16u32.to_le_bytes(), &1u16.to_le_bytes(), &2u16.to_le_bytes(),
-            &48000u32.to_le_bytes(), &(48000u32 * 4).to_le_bytes(), &4u16.to_le_bytes(), &16u16.to_le_bytes(), b"data", &(data.len() as u32).to_le_bytes(), &data] {
+        for chunk in [
+            &b"RIFF"[..],
+            &(36 + data.len() as u32).to_le_bytes(),
+            b"WAVEfmt ",
+            &16u32.to_le_bytes(),
+            &1u16.to_le_bytes(),
+            &2u16.to_le_bytes(),
+            &48000u32.to_le_bytes(),
+            &(48000u32 * 4).to_le_bytes(),
+            &4u16.to_le_bytes(),
+            &16u16.to_le_bytes(),
+            b"data",
+            &(data.len() as u32).to_le_bytes(),
+            &data,
+        ] {
             wav.extend_from_slice(chunk);
         }
         std::fs::write(path, wav).unwrap();
@@ -992,7 +1332,8 @@ mod tests {
         let game = PathBuf::from(std::env::var_os("SKATE2_GAME_ROOT").unwrap());
         let mut mounts = MountSet::new();
         for spec in SKATE2_ARCHIVES.iter().take(4) {
-            mounts.push(MountedBig::open(spec.path_under(&game), spec.use_external_header).unwrap());
+            mounts
+                .push(MountedBig::open(spec.path_under(&game), spec.use_external_header).unwrap());
         }
         let (mut system, _) = load_system(&mounts).unwrap();
         let mut stereo = Vec::new();
@@ -1031,8 +1372,15 @@ mod tests {
             system.world = Some(WorldAudioState {
                 frame: tick + 1,
                 sim_tick: tick + 1,
-                camera: CameraMatrix { at: [0.0, 0.0, 1.0, 0.0], position: [0.0, 1.5, -4.0, 1.0] },
-                player: PlayerFrame { skaters: vec![skater], game_speed: 1.0, is_rewinding: false },
+                camera: CameraMatrix {
+                    at: [0.0, 0.0, 1.0, 0.0],
+                    position: [0.0, 1.5, -4.0, 1.0],
+                },
+                player: PlayerFrame {
+                    skaters: vec![skater],
+                    game_speed: 1.0,
+                    is_rewinding: false,
+                },
                 ..WorldAudioState::default()
             });
             system.update(1.0 / 60.0);
@@ -1042,7 +1390,8 @@ mod tests {
             }
         }
         let peak = |from: f32, to: f32| {
-            let range = (from * 48000.0) as usize * 2..((to * 48000.0) as usize * 2).min(stereo.len());
+            let range =
+                (from * 48000.0) as usize * 2..((to * 48000.0) as usize * 2).min(stereo.len());
             stereo[range].iter().fold(0.0f32, |m, x| m.max(x.abs()))
         };
         let (push, rolling, landing) = (peak(0.0, 1.0), peak(1.5, 1.95), peak(2.5, 3.5));

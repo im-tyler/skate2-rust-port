@@ -24,20 +24,27 @@ inputs are cited where they constrain a phase.
    interposer: 24/25 idle runs identical, 6/12 under load). Phase 1a makes
    the seeds explicit inputs (native keeps today's clock defaults); the
    oracle pins them.
-2. **The oracle is a no-streams render.** The existing test's render reads
-   the stream pool — music (`data/audio/music/Ipod_Stream.mus`, ~90 KB per
-   run) — and pool streams cannot run on wasm (no reader threads), so any
-   oracle including streams can never match tab to native. The pause-menu
-   **press sound is a splicer bank sound, not streamed**: the oracle sets
-   `GameAudioState.music_mode` to `music_mode::OFF` (music/mod.rs:118)
-   before its first update and asserts **zero** `StreamFiles` reads. The
-   dump path (`SKATE2_AUDIO_DUMP`) proves the render's frame content is
+2. **The oracle is a stream-free render.** The existing test's render reads
+   the stream pool — music (`data/audio/music/Ipod_Stream.mus`, hundreds of
+   reads per run) — and pool streams cannot run on wasm (no reader threads),
+   so any oracle including streams can never match tab to native. Measured
+   during phase 1c: `music_mode: OFF` does **not** stop the music stream (the
+   reads continue and the hash is unchanged), so the oracle removes the
+   streams at the source instead: `skate2_audio::oracle` pins the seeds
+   (`ORACLE_SEEDS`) and supplies `AbsentStreams`, a `StreamFiles` whose every
+   file is missing — each stream consumer (speech projects, resident samples,
+   the pool's chunk reads) answers a missing file with an early return, and
+   the pool's reader thread drops the failed request without retrying, so no
+   bytes are read and nothing races, on any host, threaded or not. The
+   pause-menu **press sound is a splicer bank sound** and renders
+   identically with the streams gone. The dump path
+   (`SKATE2_AUDIO_DUMP`) proves the render's frame content is
    time-independent once seeds and streams are pinned; the frame hash (over
-   `to_bits`) is the oracle. Cross-target floats: every runtime libm call
-   in the path casts to f32, and f32 results matched across macOS and wasm
-   libms in a 2M-input probe — f64 `sin`/`powf` etc. differ bit-for-bit but
-   are not observable here. The native hash records the platform it was
-   taken on.
+   `to_bits`) is the oracle, verified bit-stable across fresh processes.
+   Cross-target floats: every runtime libm call in the path casts to f32,
+   and f32 results matched across macOS and wasm libms in a 2M-input probe —
+   f64 `sin`/`powf` etc. differ bit-for-bit but are not observable here. The
+   native hash records the platform it was taken on.
 3. **The system loader moves into `skate2-audio` as bytes-in.** Today
    `load_system` (game_audio.rs:306) mounts four archives and opens ~25
    audio files by path; every input is bytes except two hidden kinds: the
@@ -128,14 +135,16 @@ Commit: `Web port step six (b): the audio system loads from bytes`.
 
 ### Phase 1c — audio: the native oracle
 
-Files: `crates/skate2-audio` (a corpus-test module or an exposed harness
-the pc app's test drives), `apps/skate2-pc/src/game_audio.rs` (test).
+Files: `crates/skate2-audio/src/oracle.rs` (new: `ORACLE_SEEDS`,
+`AbsentStreams`, `frame_hash`, the 180-tick script), `apps/skate2-pc/src/
+game_audio.rs` (an `oracle_load_system` over `AbsentStreams` and the pinned
+test).
 
-- The pause-menu test: pinned seeds, `music_mode: OFF` before the first
-  update, a read-counting `StreamFiles` asserted zero, 180 ticks at 60 Hz,
-  and a deterministic frame hash (wrapping multiply over `to_bits`).
-  Record the hash and the platform once.
-- Gate: the corpus test, run twice, identical hashes; ratchet; scoped
+- The pause-menu test: pinned seeds, `AbsentStreams`, 180 ticks at 60 Hz,
+  and the deterministic frame hash (wrapping FNV over `to_bits`), asserted
+  stable across two system builds in one run. Record the hash and the
+  platform once; the recorded constant asserts it.
+- Gate: the corpus test, run three times, identical hashes; ratchet; scoped
   clippy/fmt.
 
 Commit: `Web port step six (c): the pause-menu render oracle, pinned`.
@@ -148,8 +157,9 @@ web-sys features), `src/audio_probe.rs` (new), `src/lib.rs`, `index.html`.
 - Fetch the loader's inputs over the page's byte source; `skater.vlt` and
   its `.bin` prefetched into a span-mounted `db.big` `MountSet` (the boot
   probe's pattern) for `AttribDb`; an empty read-counting `StreamFiles`.
-- Build through the same constructor, play the press key, render the same
-  180 ticks, assert the recorded hash and zero stream reads.
+- Build through the same constructor with `oracle::AbsentStreams`, play the
+  press key, render the same 180 ticks, assert the recorded hash (absent
+  streams by construction: no reads happen on either host).
 - Panel line `audio probe: N frames, hash matches native`; `?audio=1`
   runs it; real-time CDP driving is the verification route.
 - Gate: `cargo test -p skate2-web`; wasm clippy; headless browser run.
@@ -245,8 +255,9 @@ Commit: `Web port step six: docs`.
   mismatch is a finding, not a tolerance to loosen.
 - `skate2_audio::load` cannot express an input without changing native
   behavior: report the input; do not fork the loader.
-- Any stream read occurs during the oracle: the zero-read assertion is the
-  design; a read means music-off did not hold — stop and report where.
+- A stream byte is read during the oracle: `AbsentStreams` fails every
+  `size`, so a delivered byte means the mechanism does not hold — stop and
+  report where.
 - The bridge must inspect or rewrite datagrams, or take its UDP target
   from the page: stop.
 - The build-identity fix weakens a production check: stop and report.
