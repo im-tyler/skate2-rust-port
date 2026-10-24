@@ -14,6 +14,10 @@ use crate::{
     system::{AemsFiles, AudioSystem, FeSound},
     vault::{AttribSource, Vault},
 };
+use skate2_formats::{
+    big::{BigArchive, BigEntry, BigEntryKey},
+    mount::MountedBig,
+};
 use std::{collections::HashMap, sync::Arc};
 
 use crate::grain_player::GrainData;
@@ -132,7 +136,7 @@ pub const EMITTER_DATA_FILES: [&str; 5] = [
 
 /// The loose grain samples and seek tables of `data\audio` (`AudioAssetManager::SyncLoad`,
 /// `FileLoader::SyncLoad`), in their on-disk letter case — native path matching ignores case
-/// (host_path), but the web's byte sources match exactly. The loader keys them lower-case.
+/// (`host_path`), but the web's byte sources match exactly. The loader keys them lower-case.
 /// Recorded once from the NTSC dump (2026-10-23): a byte source cannot enumerate a directory,
 /// and the wheels load exactly these.
 pub const LOOSE_GRAIN_FILES: [&str; 4] = [
@@ -259,4 +263,227 @@ pub fn loose_grain(name: &str, bytes: Vec<u8>) -> (String, GrainData) {
             bytes: Arc::from(bytes),
         },
     )
+}
+
+/// Where the loader's `data\audio` files come from: the pc host mounts the
+/// archives from disk, the browser over the spans it prefetched
+/// ([`wanted_entries`]). Both feed the same [`read_inputs`].
+pub trait AudioFiles {
+    /// `data\audio\<name>`, mounted.
+    ///
+    /// # Errors
+    /// The archive cannot be opened.
+    fn archive(&self, name: &str) -> Result<MountedBig, String>;
+    /// `data\audio\<name>`'s bytes; `None` when the file is absent.
+    ///
+    /// # Errors
+    /// The file exists but cannot be read.
+    fn loose(&self, name: &str) -> Result<Option<Vec<u8>>, String>;
+}
+
+/// Every `data\audio` archive [`read_inputs`] mounts.
+pub const ARCHIVES: [&str; 13] = [
+    "splicerfe.big",
+    "splicerskateboard.big",
+    "splicercollision.big",
+    "grains.big",
+    "emitters.big",
+    "emitters2.big",
+    "skateboard.big",
+    "pedestrian.big",
+    "rolling.big",
+    "vehicle.big",
+    "crowds.big",
+    "dynamicobject.big",
+    "moments.big",
+];
+
+/// Every loose `data\audio` file [`read_inputs`] reads: the mix map and the
+/// emitter data files are required, [`LOOSE_GRAIN_FILES`] optional.
+pub fn loose_files() -> impl Iterator<Item = &'static str> {
+    std::iter::once(MIX_MAP)
+        .chain(EMITTER_DATA_FILES)
+        .chain(LOOSE_GRAIN_FILES)
+}
+
+const MIX_MAP: &str = "MixMapSK8.mxb";
+
+/// The front-end banks of `splicerfe.big`.
+const FE_BANKS: [&str; 2] = ["Sk82_FE.bnk", "sk8_menu.bnk"];
+
+/// The entries of `data\audio\<name>` that [`read_inputs`] reads, so a ranged
+/// host can make exactly those resident first. Archives read whole
+/// (`grains.big`, `emitters.big`) answer every named entry.
+#[must_use]
+pub fn wanted_entries<'a>(name: &str, archive: &'a BigArchive) -> Vec<&'a BigEntry> {
+    let named: Vec<&str> = match name {
+        "grains.big" | "emitters.big" => {
+            return archive
+                .entries
+                .iter()
+                .filter(|entry| matches!(entry.key, BigEntryKey::Name(_)))
+                .collect();
+        }
+        "splicerfe.big" => FE_BANKS.to_vec(),
+        "splicerskateboard.big" => SKATEBOARD_BANKS.iter().map(|(bank, _)| *bank).collect(),
+        "splicercollision.big" => COLLISION_BANKS
+            .iter()
+            .map(|(bank, _)| *bank)
+            .chain(crate::main_objects::HOM_BANK_NAMES)
+            .collect(),
+        _ => AEMS_INTERFACES
+            .iter()
+            .chain(&AEMS_BANKS)
+            .chain(&DMO_BANKS)
+            .chain(&MOMENTS_BANKS)
+            .chain(&VEHICLE_BANKS)
+            .filter(|(big, _)| *big == name)
+            .map(|(_, file)| *file)
+            .collect(),
+    };
+    named
+        .into_iter()
+        .filter_map(|file| archive.find_path(file))
+        .collect()
+}
+
+/// Every byte input of [`load`] from `files`, with the caller's stream reader:
+/// the pc host's assembly, moved here so every host runs the same one.
+///
+/// # Errors
+/// The failing archive, entry or file.
+pub fn read_inputs(
+    files: &dyn AudioFiles,
+    stream_files: Arc<dyn crate::rwac::stream_pool::StreamFiles>,
+) -> Result<AudioInputs, String> {
+    let fe = files.archive("splicerfe.big")?;
+    let [fe_bank, menu_bank] = FE_BANKS.map(|bank| {
+        fe.read_path(bank)
+            .map(Arc::from)
+            .map_err(|e| format!("{bank}: {e}"))
+    });
+    Ok(AudioInputs {
+        fe_bank: fe_bank?,
+        menu_bank: menu_bank?,
+        skateboard_banks: splicer_banks(files, "splicerskateboard.big", &SKATEBOARD_BANKS)?,
+        collision_banks: splicer_banks(files, "splicercollision.big", &COLLISION_BANKS)?,
+        hom_banks: hom_banks(files)?,
+        mix_map: files
+            .loose(MIX_MAP)?
+            .ok_or_else(|| format!("{MIX_MAP}: absent"))?,
+        grains: grain_files(files)?,
+        aems: aems_files(files)?,
+        stream_files,
+    })
+}
+
+/// One splicer bank as [`AudioInputs`] carries it: (name, `SPLICE_TYPE` slot, bytes).
+type SplicerBank = (String, usize, Arc<[u8]>);
+
+/// The banks of one `data\audio` splicer archive.
+fn splicer_banks(
+    files: &dyn AudioFiles,
+    archive: &str,
+    banks: &[(&str, usize)],
+) -> Result<Vec<SplicerBank>, String> {
+    let big = files.archive(archive)?;
+    banks
+        .iter()
+        .map(|&(name, slot)| {
+            big.read_path(name)
+                .map(|bytes| (name.to_owned(), slot, Arc::from(bytes)))
+                .map_err(|e| format!("{name}: {e}"))
+        })
+        .collect()
+}
+
+/// `GetHOMBank` 0x824e6a08's banks (`sHOMBankNames`), in their order.
+fn hom_banks(files: &dyn AudioFiles) -> Result<Vec<Arc<[u8]>>, String> {
+    let big = files.archive("splicercollision.big")?;
+    crate::main_objects::HOM_BANK_NAMES
+        .iter()
+        .map(|&name| {
+            big.read_path(name)
+                .map(Arc::from)
+                .map_err(|e| format!("{name}: {e}"))
+        })
+        .collect()
+}
+
+/// `data\audio\grains.big`'s `.grain` files, which the skateboards' `LoadDataForSurface` loads by
+/// their `GrainFile` name, and the loose `data\audio` samples and seek tables (`.snr`, `.sek`)
+/// the wheels load by name (`AudioAssetManager::SyncLoad`, `FileLoader::SyncLoad`) — the recorded
+/// list, because the browser's byte source cannot enumerate a directory.
+fn grain_files(files: &dyn AudioFiles) -> Result<GrainFiles, String> {
+    let big = files.archive("grains.big")?;
+    let mut grains = GrainFiles::new();
+    for entry in &big.archive().entries {
+        let BigEntryKey::Name(name) = &entry.key else {
+            continue;
+        };
+        let bytes = big.read_entry(entry).map_err(|e| format!("{name}: {e}"))?;
+        grains.insert(
+            name.to_lowercase(),
+            GrainData {
+                bytes: Arc::from(bytes),
+            },
+        );
+    }
+    for name in LOOSE_GRAIN_FILES {
+        // The old directory walk skipped a missing file; keep that: a dump
+        // without these loses two wheel sounds, not all audio.
+        let Some(bytes) = files.loose(name)? else {
+            continue;
+        };
+        let (name, grain) = loose_grain(name, bytes);
+        grains.insert(name, grain);
+    }
+    Ok(grains)
+}
+
+fn big_file(files: &dyn AudioFiles, big: &str, name: &str) -> Result<Vec<u8>, String> {
+    let archive = files.archive(big)?;
+    let entry = archive
+        .archive()
+        .find_name(name)
+        .ok_or_else(|| format!("{big}: no {name}"))?;
+    archive
+        .read_entry(entry)
+        .map_err(|e| format!("{name}: {e}"))
+}
+
+fn aems_files(files: &dyn AudioFiles) -> Result<AemsFiles, String> {
+    let mut aems = AemsFiles::default();
+    for name in EMITTER_DATA_FILES {
+        let bytes = files
+            .loose(name)?
+            .ok_or_else(|| format!("{name}: absent"))?;
+        aems.emitters
+            .data_files
+            .push((format!("data\\audio\\{name}"), bytes));
+    }
+    // The banks the emitter system's swap slots load from `data\audio\emitters.big`.
+    let emitters = files.archive("emitters.big")?;
+    for entry in &emitters.archive().entries {
+        if let BigEntryKey::Name(name) = &entry.key {
+            let bytes = emitters
+                .read_entry(entry)
+                .map_err(|e| format!("{name}: {e}"))?;
+            aems.emitters.banks.push((name.clone(), Arc::from(bytes)));
+        }
+    }
+    for (big, name) in AEMS_INTERFACES {
+        aems.interfaces
+            .push((name.to_owned(), big_file(files, big, name)?));
+    }
+    for (big, name) in AEMS_BANKS
+        .iter()
+        .chain(&DMO_BANKS)
+        .chain(&MOMENTS_BANKS)
+        .chain(&VEHICLE_BANKS)
+    {
+        aems.banks
+            .push(((*name).to_owned(), Arc::from(big_file(files, big, name)?)));
+    }
+    Ok(aems)
 }

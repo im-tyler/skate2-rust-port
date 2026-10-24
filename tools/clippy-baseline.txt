@@ -1,28 +1,15 @@
 # The workspace clippy ratchet baseline, enforced by tools/clippy_ratchet.py.
-# The total is the sum over (crate, target) of `generated N warnings` minus the
-# replayed duplicates — each target's own distinct diagnostics, stable across
-# runs and cache states. It may only go down; record an intentional drop with
-# --update in the same change. Per-target lines are context, not enforced.
+# The total is the number of distinct warning diagnostics (crate, primary span,
+# code, message) across every target — independent of cargo's compile and
+# replay order. It may only go down; record an intentional drop with --update
+# in the same change. Per-crate lines are context, not enforced.
 rustc: 1.99.0
-total: 16866
-#   skate2-audio (lib test): 40
-#   skate2-audio (lib): 2049
-#   skate2-core (lib test): 1352
-#   skate2-core (lib): 10136
-#   skate2-core (test "boot_probe_threaded"): 0
-#   skate2-core (test "boot_probe_threadless"): 10
-#   skate2-formats (lib test): 56
-#   skate2-formats (lib): 700
-#   skate2-net (example "frame_lab"): 12
-#   skate2-net (example "frame_stats"): 10
-#   skate2-net (example "server_load"): 1
-#   skate2-net (lib test): 12
-#   skate2-net (lib): 30
-#   skate2-pc (bin "skate2-pc" test): 2315
-#   skate2-pc (bin "skate2-pc"): 13
-#   skate2-update (lib test): 1
-#   skate2-update (lib): 1
-#   skate2-web (lib test): 6
-#   skate2-web (lib): 5
-#   skate2-xma (lib test): 3
-#   skate2-xma (lib): 114
+total: 16827
+#   skate2-audio: 2084
+#   skate2-core: 11476
+#   skate2-formats: 754
+#   skate2-net: 65
+#   skate2-pc: 2319
+#   skate2-update: 1
+#   skate2-web: 11
+#   skate2-xma: 117

@@ -7,12 +7,15 @@ This script enforces the one hard rule: the workspace clippy warning total
 may never exceed the recorded baseline, and an intentional drop is
 recorded with `--update` in the same change that caused it.
 
-The total is cargo's own per-target summary — every
-`warning: `<crate>` (<target>) generated N warnings` line, summed over the
-distinct (crate, target) pairs. Raw diagnostic lines are an emission
-artifact (cached units replay text with per-target duplication whose
-multiplicity shifts with the build cache), but the per-target totals are
-stored in the fingerprints and are stable run to run.
+The total is the number of distinct warning diagnostics across the
+workspace: each `--message-format=json` warning keyed by its crate, primary
+span (file, line, column), lint code and message, deduplicated across
+targets. A lib's warning reported again by its test target is one warning.
+Cargo's own `generated N warnings (M duplicates)` summaries are not used:
+which target is charged the duplicates depends on the order cargo compiles
+and replays targets, which shifts whenever the build graph changes (a new
+dependency edge moved ~2k warnings between `skate2-audio`'s lib and test
+targets on an unchanged tree). A set of keyed diagnostics has no order.
 
 Usage:
     python3 tools/clippy_ratchet.py           # enforce against the baseline
@@ -20,7 +23,7 @@ Usage:
 """
 from __future__ import annotations
 
-import re
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -28,36 +31,52 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "tools" / "clippy-baseline.txt"
 
-# `warning: `skate2-core` (lib) generated 447 warnings` and the replay form
-# `warning: `skate2-core` (lib) generated 447 warnings (200 duplicates)`. A
-# target's own distinct diagnostics are `generated - duplicates`.
-SUMMARY = re.compile(
-    r"^warning: `([^`]+)` \(([^)]*)\) generated (\d+) warnings?(?: \((\d+) duplicates\))?"
-)
-
-
 def count_clippy() -> tuple[int, dict[str, int], str]:
     run = subprocess.run(
-        ["cargo", "clippy", "--workspace", "--all-targets"],
+        ["cargo", "clippy", "--workspace", "--all-targets", "--message-format=json"],
         cwd=ROOT,
         capture_output=True,
         text=True,
         check=False,
     )
-    lines = (run.stdout + run.stderr).splitlines()
     rustc = subprocess.run(
         ["rustc", "--version"], cwd=ROOT, capture_output=True, text=True, check=True
     ).stdout.strip()
-    per_target: dict[str, int] = {}
-    for line in lines:
-        matched = SUMMARY.match(line)
-        if matched:
-            crate, target, generated, duplicates = matched.groups()
-            # A pair can appear twice (fresh and replayed); keep the real total.
-            key = f"{crate} ({target})"
-            distinct = int(generated) - int(duplicates or 0)
-            per_target[key] = max(per_target.get(key, 0), distinct)
-    return sum(per_target.values()), per_target, rustc
+    seen: set[tuple] = set()
+    per_crate: dict[str, int] = {}
+    for line in run.stdout.splitlines():
+        if not line.startswith("{"):
+            continue
+        record = json.loads(line)
+        if record.get("reason") != "compiler-message":
+            continue
+        message = record["message"]
+        if message.get("level") != "warning":
+            continue
+        spans = [span for span in message.get("spans", []) if span.get("is_primary")]
+        # The summary lines (`N warnings emitted`) carry no span and no code.
+        if not spans and message.get("code") is None:
+            continue
+        # `path+file:///…/skate2-core#0.1.0`, or `…/dir#name@0.1.0` when the
+        # package name differs from its directory.
+        url, _, fragment = record["package_id"].partition("#")
+        crate = fragment.split("@", 1)[0] if "@" in fragment else url.rsplit("/", 1)[-1]
+        primary = spans[0] if spans else {}
+        key = (
+            crate,
+            primary.get("file_name"),
+            primary.get("line_start"),
+            primary.get("column_start"),
+            (message.get("code") or {}).get("code"),
+            message.get("message"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        per_crate[crate] = per_crate.get(crate, 0) + 1
+    if run.returncode != 0 and not seen:
+        sys.exit(run.stderr[-2000:])
+    return len(seen), per_crate, rustc
 
 
 def read_baseline() -> tuple[int, str]:
@@ -73,26 +92,26 @@ def read_baseline() -> tuple[int, str]:
     return total, rustc
 
 
-def write_baseline(total: int, per_target: dict[str, int], rustc: str) -> None:
+def write_baseline(total: int, per_crate: dict[str, int], rustc: str) -> None:
     body = [
         "# The workspace clippy ratchet baseline, enforced by tools/clippy_ratchet.py.",
-        "# The total is the sum over (crate, target) of `generated N warnings` minus the",
-        "# replayed duplicates — each target's own distinct diagnostics, stable across",
-        "# runs and cache states. It may only go down; record an intentional drop with",
-        "# --update in the same change. Per-target lines are context, not enforced.",
+        "# The total is the number of distinct warning diagnostics (crate, primary span,",
+        "# code, message) across every target — independent of cargo's compile and",
+        "# replay order. It may only go down; record an intentional drop with --update",
+        "# in the same change. Per-crate lines are context, not enforced.",
         f"rustc: {rustc.split()[1] if len(rustc.split()) > 1 else rustc}",
         f"total: {total}",
     ]
-    body += [f"#   {name}: {count}" for name, count in sorted(per_target.items())]
+    body += [f"#   {name}: {count}" for name, count in sorted(per_crate.items())]
     BASELINE.write_text("\n".join(body) + "\n", encoding="utf8")
 
 
 def main() -> int:
     update = "--update" in sys.argv[1:]
-    total, per_target, rustc = count_clippy()
+    total, per_crate, rustc = count_clippy()
     if update:
         old, _ = read_baseline() if BASELINE.exists() else (None, "")
-        write_baseline(total, per_target, rustc)
+        write_baseline(total, per_crate, rustc)
         print(f"clippy ratchet: baseline recorded at {total}" + (f" (was {old})" if old else ""))
         return 0
     baseline, baseline_rustc = read_baseline()

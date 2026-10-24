@@ -2202,6 +2202,7 @@ dependencies = [
 name = "skate2-core"
 version = "0.1.0"
 dependencies = [
+ "skate2-audio",
  "skate2-formats",
  "skate2-net",
 ]

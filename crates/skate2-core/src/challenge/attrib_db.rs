@@ -579,6 +579,43 @@ impl<'a> Attribute<'a> {
     }
 }
 
+/// The vault as the audio code reads it (`Attrib::Instance::GetAttributePointer`,
+/// `mLayoutPtr`): the one adapter every host's audio loader is handed.
+#[cfg(feature = "audio")]
+impl skate2_audio::vault::AttribSource for AttribDb {
+    fn attribute(&self, class: u64, collection: u64, key: u64, index: u32) -> Option<Vec<u8>> {
+        AttribDb::attribute(self, class, collection, key)?.value_bytes(index as usize)
+    }
+
+    fn layout_word(&self, class: u64, collection: u64, index: u32) -> u32 {
+        AttribDb::layout_word(self, class, collection, index)
+    }
+
+    fn has_collection(&self, class: u64, collection: u64) -> bool {
+        AttribDb::has_collection(self, class, collection)
+    }
+
+    fn layout_text(&self, class: u64, collection: u64, index: u32) -> Option<String> {
+        AttribDb::layout_text(self, class, collection, index).map(str::to_owned)
+    }
+
+    fn text(&self, class: u64, collection: u64, key: u64, index: u32) -> Option<String> {
+        AttribDb::attribute(self, class, collection, key)?
+            .text(index as usize)
+            .map(str::to_owned)
+    }
+
+    fn length(&self, class: u64, collection: u64, key: u64) -> u32 {
+        AttribDb::attribute(self, class, collection, key).map_or(0, |attribute| {
+            u32::try_from(attribute.len()).unwrap_or(u32::MAX)
+        })
+    }
+
+    fn leaf_collections(&self, class: u64) -> Vec<u64> {
+        AttribDb::leaf_collections(self, class)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

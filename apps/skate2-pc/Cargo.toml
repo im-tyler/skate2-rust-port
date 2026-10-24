@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-skate2-core = { path = "../../crates/skate2-core" }
+skate2-core = { path = "../../crates/skate2-core", features = ["audio"] }
 skate2-formats = { path = "../../crates/skate2-formats" }
 skate2-audio = { path = "../../crates/skate2-audio" }
 skate2-net = { path = "../../crates/skate2-net" }

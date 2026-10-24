@@ -149,17 +149,49 @@ test).
 
 Commit: `Web port step six (c): the pause-menu render oracle, pinned`.
 
+### Phase 2a — audio: one input assembly for every host
+
+Amended before phase 2 (evidence: 1b moved the *constructor* but left the
+archive-level assembly — which archives, which entries, `grains.big` and
+`emitters.big` read whole — in `game_audio.rs`, and `VaultSource` app-side;
+the tab would have had to copy both, i.e. fork the loader).
+
+Files: `crates/skate2-audio/src/load.rs` (`AudioFiles`: mount an archive /
+read a loose file; `read_inputs`, the pc assembly moved unchanged;
+`ARCHIVES`, `loose_files`, `wanted_entries` — the entries `read_inputs`
+reads, for a ranged host's prefetch), `crates/skate2-core` (`AttribSource`
+for `AttribDb` behind an optional `audio` feature — the one vault adapter),
+`apps/skate2-pc/src/game_audio.rs` (a disk `AudioFiles`; `VaultSource`
+gone), `tools/clippy_ratchet.py`.
+
+- Proof of no native change: the oracle hash is unchanged.
+- The ratchet's 1c metric (`generated − duplicates`) is order-dependent:
+  the new core→audio edge moved ~2k warnings between `skate2-audio`'s lib
+  and test targets on an unchanged tree. It now counts distinct JSON
+  diagnostics keyed by crate, primary span, code and message — a set,
+  verified identical across forced recompiles on both trees.
+
+Commit: `Web port step six (d0): one audio input assembly for every host`.
+
 ### Phase 2 — audio in the tab, headless
 
 Files: `apps/skate2-web/Cargo.toml` (skate2-audio/xma dependencies,
-web-sys features), `src/audio_probe.rs` (new), `src/lib.rs`, `index.html`.
+skate2-core's `audio` feature), `src/audio_probe.rs` (new), `src/lib.rs`,
+`index.html`; `skate2_audio::oracle` takes the recorded hash so both hosts
+assert one constant.
 
-- Fetch the loader's inputs over the page's byte source; `skater.vlt` and
-  its `.bin` prefetched into a span-mounted `db.big` `MountSet` (the boot
-  probe's pattern) for `AttribDb`; an empty read-counting `StreamFiles`.
-- Build through the same constructor with `oracle::AbsentStreams`, play the
-  press key, render the same 180 ticks, assert the recorded hash (absent
-  streams by construction: no reads happen on either host).
+- Open the tables of `load::ARCHIVES` and `db.big` over ranges; make
+  exactly `wanted_entries` (and `skater.vlt` plus the `.bin`s it names)
+  resident as stored spans with **no miss handler** — a miss is a hard
+  error; read the loose files whole. `read_inputs` over span-mounted
+  archives, `AttribDb::load` over the span-mounted `db.big`.
+- Build through the same constructor with `oracle::AbsentStreams` (call
+  counted), play the press key, render the same 180 ticks, assert the
+  recorded hash (absent streams by construction: no bytes on either host;
+  on wasm the pool's reader-thread spawn fails and the stream closes).
+- The host-neutral half (prefetch plan, span mounts, build, render) is
+  also run natively by an ignored corpus test over file-range reads: the
+  tab's exact configuration minus the fetch transport.
 - Panel line `audio probe: N frames, hash matches native`; `?audio=1`
   runs it; real-time CDP driving is the verification route.
 - Gate: `cargo test -p skate2-web`; wasm clippy; headless browser run.
@@ -267,7 +299,7 @@ Commit: `Web port step six: docs`.
 ## 3. Order and dependencies
 
 ```
-1a seeds ──► 1b loader ──► 1c oracle ──► 2 tab hash ──► 3 audible ──► 6 docs
+1a seeds ──► 1b loader ──► 1c oracle ──► 2a assembly ──► 2 tab hash ──► 3 audible ──► 6 docs
 4 bridge ──► 5a clock ──► 5b tab session ─────────────────────────────┘
 ```
 

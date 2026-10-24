@@ -8,6 +8,12 @@ rust-version.workspace = true
 [dependencies]
 skate2-formats = { path = "../skate2-formats" }
 skate2-net = { path = "../skate2-net" }
+# The vault's `AttribSource` adapter for the audio loader, for the hosts that
+# build the audio system.
+skate2-audio = { path = "../skate2-audio", optional = true }
+
+[features]
+audio = ["dep:skate2-audio"]
 
 [lints]
 workspace = true
