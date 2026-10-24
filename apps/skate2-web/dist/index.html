@@ -7,8 +7,8 @@
   <!-- The cdylib (lib.rs `start`), not the desktop-only debug binary. -->
   
 <script type="module">
-import init, * as bindings from '/skate2-web-24e1ef40fc8b5363.js';
-const wasm = await init({ module_or_path: '/skate2-web-33e43ffff24a4791_bg.wasm' });
+import init, * as bindings from '/skate2-web-c1bd68f45c6a781c.js';
+const wasm = await init({ module_or_path: '/skate2-web-c9edcd2c9366bc6c_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -115,7 +115,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
       z-index: 5;
     }
     #pick-folder:hover { border-color: var(--accent); }
-    #boot-probe, #audio-probe {
+    #boot-probe, #audio-probe, #audio-play {
       position: absolute;
       bottom: 54px;
       right: 12px;
@@ -130,8 +130,9 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
       z-index: 5;
     }
     #audio-probe { bottom: 96px; }
-    #boot-probe:hover, #audio-probe:hover { border-color: var(--accent); }
-    #boot-line, #audio-line {
+    #audio-play { bottom: 138px; }
+    #boot-probe:hover, #audio-probe:hover, #audio-play:hover { border-color: var(--accent); }
+    #boot-line, #audio-line, #audio-out-line {
       color: var(--accent);
       padding-top: 6px;
       white-space: pre-wrap;
@@ -166,7 +167,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
       word-break: break-all;
     }
   </style>
-<link rel="modulepreload" href="/skate2-web-24e1ef40fc8b5363.js" crossorigin="anonymous" integrity="sha384-mGVsgG8+XbU8RqKWm1PnaD+ievBPDeonZFT4ilki4WPWxEh0L1QemtLFNxe4TgR2"><link rel="preload" href="/skate2-web-33e43ffff24a4791_bg.wasm" crossorigin="anonymous" integrity="sha384-pmavSQnAMwzFSgW+WX8XBKLQXoN3eF1LCgHdpoOwyr8raryf6ANjciZzKNDuXniH" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/skate2-web-c1bd68f45c6a781c.js" crossorigin="anonymous" integrity="sha384-Rz0nuls7GQD3w61gL/kM5tBST47D8HTN3CpXib4pEYlimViVhOyeJVVfoZhjM73q"><link rel="preload" href="/skate2-web-c9edcd2c9366bc6c_bg.wasm" crossorigin="anonymous" integrity="sha384-IPfd5p5qiExpTvZxksy+lRi9wGlJeDEaviHT8kC4FYKoMEyz1Ph/XTBWrjEDs47y" as="fetch" type="application/wasm"></head>
 <body>
   <canvas id="skate2-canvas" tabindex="0"></canvas>
 
@@ -205,12 +206,14 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
   <button id="pick-folder">Load game folder…</button>
   <button id="boot-probe">Run boot probe</button>
   <button id="audio-probe">Run audio probe</button>
+  <button id="audio-play">Play pause-menu sound</button>
 
   <div id="assets">
     <div class="row"><span class="k">game data</span><span id="assets-found">—</span></div>
     <div id="assets-archives"></div>
     <div id="boot-line"></div>
     <div id="audio-line"></div>
+    <div id="audio-out-line"></div>
   </div>
 </body>
 </html>
