@@ -12,7 +12,8 @@ use crate::transport::{self, Endpoint, kind};
 use crate::words::WordList;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 struct Net {
     server: ServerCore,

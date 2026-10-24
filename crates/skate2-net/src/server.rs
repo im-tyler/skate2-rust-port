@@ -17,7 +17,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io::Write as _;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use web_time::Instant;
 
 /// What a message asks that only the game host peer may: start the challenge, make the game
 /// private or public, kick a player, set the next challenge, or change challenge or location.

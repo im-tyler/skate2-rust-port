@@ -14,7 +14,8 @@ use skate2_net::protocol::{ClientMessage, PlayNow, PlayNowMode, ServerMessage, c
 use skate2_net::server::ServerCore;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// Bones of a skater's pose.
 const BONES: usize = 133;

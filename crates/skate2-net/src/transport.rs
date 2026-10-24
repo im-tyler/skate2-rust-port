@@ -7,7 +7,8 @@
 use crate::codec::{DecodeError, Reader, Writer};
 use crate::crypto::{self, KEY_BYTES, PROOF_BYTES, Session};
 use std::collections::{BTreeMap, VecDeque};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// Bytes identifying the protocol at the start of every datagram.
 pub const MAGIC: u16 = 0x5332;
