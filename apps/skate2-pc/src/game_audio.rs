@@ -10,8 +10,8 @@ use skate2_audio::player::pos3d::CameraMatrix;
 use skate2_audio::player::skateboard::GrainFiles;
 use skate2_audio::player::PlayerFrame;
 use skate2_audio::presentation::{audio_material, multiplier_flags, CollisionInfo, PhysOutView};
-use skate2_audio::system::{AemsFiles, AudioSystem, FeSound, GameAudioState, WorldAudioState};
-use skate2_audio::vault::{AttribSource, Vault};
+use skate2_audio::system::{AemsFiles, AudioSystem, GameAudioState, WorldAudioState};
+use skate2_audio::vault::AttribSource;
 use skate2_audio::world::pedestrian::{PedStateOut, PedestrianData};
 use skate2_audio::world::dynamic_object::{DmoSwapFiles, DynamicData};
 use skate2_audio::world::traffic::VehicleData;
@@ -19,7 +19,6 @@ use skate2_core::challenge::attrib_db::AttribDb;
 use skate2_core::ui::music_player::MusicRequest;
 use skate2_core::ui::FeSoundRequest;
 use skate2_core::{AudioSkater, SkaterAudioPhysOut};
-use skate2_formats::attrib::string_hash64;
 use skate2_formats::big::BigEntryKey;
 use skate2_formats::mount::{MountSet, MountedBig};
 use std::collections::{HashMap, VecDeque};
@@ -28,12 +27,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicBool,Ordering};
 use std::time::Instant;
 
-/// `Attrib::Gen::fe`'s class.
-const FE_CLASS: u64 = 0x5831_CB95_F3E9_0598;
-const HOM_SPLICE: u64 = 0x845A_1005_2522_A2FB;
-const LOGO_TYPE: u64 = 0xA408_0FB6_5880_E3C2;
-const FLANGE: u64 = 0xBF45_D439_FAC7_1A2E;
-const HOM_EXPIRE_TIME: u64 = 0x9DAD_777A_FEA4_E73C;
 const MIX_RATE: u32 = 48_000;
 
 /// The game root, derived from the Boot archive the way `marker_ui::Assets::load` does.
@@ -45,33 +38,6 @@ fn game_root(mounts: &MountSet) -> Result<PathBuf, String> {
         .ok_or("audio requires the miscboot mount")?;
     boot.data_path().parent().and_then(Path::parent).and_then(Path::parent).map(Path::to_path_buf).ok_or_else(|| "invalid Boot archive path".to_owned())
 }
-
-/// The splicer banks `LoadSkateboardData` 0x824ee4b8 (`splicerskateboard.big`) and
-/// `LoadCollisionData` 0x824ee348 (`splicercollision.big`) load, in their order, with each bank's
-/// `SPLICE_TYPE`.
-const SKATEBOARD_BANKS: [(&str, usize); 20] = [
-    ("CellPhone_Rings.bnk", 27),
-    ("Foot_Scrapes.bnk", 17),
-    ("L4_Lands_Ollies.bnk", 20),
-    ("sk82_cloth.bnk", 23),
-    ("Sk82_Whsh_Bys.bnk", 21),
-    ("sk8_foley_rattle.bnk", 24),
-    ("SK8_Foot_Catch.bnk", 16),
-    ("Sk8_Lands_Hrd_Cnc.bnk", 8),
-    ("Sk8_Lands_Hrd_Wd.bnk", 9),
-    ("Sk8_Lands_Sft_Cnc.bnk", 10),
-    ("Sk8_Lands_Sft_Wd.bnk", 11),
-    ("SK8_Ollie_Scrapes.bnk", 14),
-    ("SK8_Ollies_Cnc.bnk", 12),
-    ("SK8_Ollies_Wood.bnk", 13),
-    ("SKATE_foot_pushes.bnk", 0),
-    ("Splice_dirtfeet.bnk", 3),
-    ("Splice_grassfeet.bnk", 4),
-    ("Splice_Hands.bnk", 19),
-    ("Splice_Smoothconc.bnk", 1),
-    ("Splice_woodfoot.bnk", 2),
-];
-const COLLISION_BANKS: [(&str, usize); 2] = [("Skate_Collisions.bnk", 5), ("Skate_Metal.bnk", 6)];
 
 /// `skater.vlt` as the audio code reads it (`Attrib::Instance::GetAttributePointer`, `mLayoutPtr`).
 struct VaultSource(AttribDb);
@@ -106,31 +72,6 @@ impl AttribSource for VaultSource {
     }
 }
 
-/// The `fe` collections and the Apt globals `FrontEndManager::RegisterAudioEnums` 0x8261b820 makes
-/// from them: `FE_SOUND_<NAME>` holds `name`, and `Audio.PlaySound` keys it with
-/// `Attrib::StringToLowerCaseKey`.
-fn fe_sounds(db: &AttribDb) -> (HashMap<u64, FeSound>, HashMap<String, u64>) {
-    let mut sounds = HashMap::new();
-    let mut globals = HashMap::new();
-    for collection in db.leaf_collections(FE_CLASS) {
-        let Some(name) = db.layout_text(FE_CLASS, collection, 0).map(str::to_owned) else { continue };
-        let attribute = |key: u64| db.attribute(FE_CLASS, collection, key);
-        let sound = FeSound {
-            volume: f32::from_bits(db.layout_word(FE_CLASS, collection, 1)),
-            menu_splice: db.layout_word(FE_CLASS, collection, 2) as i32,
-            fe_splice: db.layout_word(FE_CLASS, collection, 3) as i32,
-            hom_splice: attribute(HOM_SPLICE).and_then(|a| a.u32(0)).unwrap_or(0),
-            logo_type: attribute(LOGO_TYPE).and_then(|a| a.i32(0)).unwrap_or(0),
-            flange: attribute(FLANGE).and_then(|a| a.bool(0)).unwrap_or(false),
-            hom_expire_time: attribute(HOM_EXPIRE_TIME).and_then(|a| a.i32(0)).unwrap_or(0),
-            name: name.clone(),
-        };
-        globals.insert(format!("FE_SOUND_{}", name.to_uppercase()), string_hash64(&name.to_lowercase()));
-        sounds.insert(collection, sound);
-    }
-    (sounds, globals)
-}
-
 /// The banks of one `data\audio` splicer archive.
 fn splicer_banks(root: &Path, archive: &str, banks: &[(&str, usize)]) -> Result<Vec<(String, usize, Arc<[u8]>)>, String> {
     let big = MountedBig::open(root.join("data/audio").join(archive), false).map_err(|e| format!("{archive}: {e}"))?;
@@ -142,7 +83,8 @@ fn splicer_banks(root: &Path, archive: &str, banks: &[(&str, usize)]) -> Result<
 
 /// `data\audio\grains.big`'s `.grain` files, which the skateboards' `LoadDataForSurface` loads by
 /// their `GrainFile` name, and the loose `data\audio` samples and seek tables (`.snr`, `.sek`)
-/// the wheels load by name (`AudioAssetManager::SyncLoad`, `FileLoader::SyncLoad`).
+/// the wheels load by name (`AudioAssetManager::SyncLoad`, `FileLoader::SyncLoad`) — the recorded
+/// list, because the browser's byte source cannot enumerate a directory.
 fn grain_files(root: &Path) -> Result<GrainFiles, String> {
     let big = MountedBig::open(root.join("data/audio/grains.big"), false).map_err(|e| format!("grains.big: {e}"))?;
     let mut files = GrainFiles::new();
@@ -151,94 +93,26 @@ fn grain_files(root: &Path) -> Result<GrainFiles, String> {
         let bytes = big.read_entry(entry).map_err(|e| format!("{name}: {e}"))?;
         files.insert(name.to_lowercase(), GrainData { bytes: Arc::from(bytes) });
     }
-    let audio = skate2_formats::host_path::on_disk(&root.join("data/audio"));
-    for entry in std::fs::read_dir(&audio).map_err(|e| format!("data/audio: {e}"))? {
-        let path = entry.map_err(|e| format!("data/audio: {e}"))?.path();
-        let loose = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("snr") || e.eq_ignore_ascii_case("sek"));
-        let Some(name) = path.file_name().and_then(|n| n.to_str()).filter(|_| loose && path.is_file()) else { continue };
-        let bytes = std::fs::read(&path).map_err(|e| format!("{name}: {e}"))?;
-        files.insert(name.to_lowercase(), GrainData { bytes: Arc::from(bytes) });
+    for name in skate2_audio::load::LOOSE_GRAIN_FILES {
+        // The old directory walk skipped a missing file; keep that: a dump
+        // without these loses two wheel sounds, not all audio.
+        let path = root.join("data/audio").join(name);
+        let Some(bytes) = skate2_formats::host_path::read_if_present(&path)
+            .map_err(|e| format!("{name}: {e}"))?
+        else {
+            continue;
+        };
+        let (name, grain) = skate2_audio::load::loose_grain(name, bytes);
+        files.insert(name, grain);
     }
     Ok(files)
 }
-
-/// `LoadCsisEventSystem` 0x824edc20's interfaces.
-const AEMS_INTERFACES: [(&str, &str); 8] = [
-    ("skateboard.big", "SK8_AEMS_skateboard.csi"),
-    ("pedestrian.big", "SK8_AEMS_Foley.csi"),
-    ("emitters2.big", "Sk8_Emitters_Project.csi"),
-    ("rolling.big", "SK8_AEMS_rolling.csi"),
-    ("vehicle.big", "AEMS_TRAFFIC.csi"),
-    ("crowds.big", "SK8_AEMS_Crowds.csi"),
-    ("dynamicobject.big", "Sk8_AEMS_MoveableObjects.csi"),
-    ("moments.big", "Sk8_moments.csi"),
-];
-
-/// The AEMS banks in `AudioAssetManager::SyncLoad` order: `Initialize`, `LoadInGameData`
-/// (`LoadSkateboardData` 0x824ee4b8, `LoadFoleyData` 0x824f0bf0), then the
-/// `SFXObj_SkateBoard` constructor's patch banks.
-const AEMS_BANKS: [(&str, &str); 20] = [
-    ("emitters2.big", "emitter_utility.abk"),
-    ("emitters2.big", "Main_Ambience_Crossfade.abk"),
-    ("skateboard.big", "board_scrapes.abk"),
-    ("skateboard.big", "Brd_Squeaks.abk"),
-    ("skateboard.big", "FOOT_DRAG.abk"),
-    ("skateboard.big", "GRINDS.abk"),
-    ("skateboard.big", "Rolling_Rattles.abk"),
-    ("skateboard.big", "Seams_Bank.abk"),
-    ("skateboard.big", "sense_of_speed.abk"),
-    ("skateboard.big", "Sk8_Air_Flip_Tricks.abk"),
-    ("skateboard.big", "Treatments.abk"),
-    ("skateboard.big", "WHEEL_SKID_BANK.abk"),
-    ("pedestrian.big", "Bodyslide.abk"),
-    ("pedestrian.big", "Foley_Cloth.abk"),
-    ("pedestrian.big", "fstep_livingworld.abk"),
-    ("pedestrian.big", "fstep_skateshoe1_sm.abk"),
-    ("rolling.big", "PatchBank_Objects.abk"),
-    ("rolling.big", "PatchBank_RocksBounce.abk"),
-    ("rolling.big", "PatchBank_Rolling_Surfaces.abk"),
-    ("rolling.big", "PatchBank_SpiderCracks.abk"),
-];
-
-/// The banks `SFXObj_Dynamic`'s constructor 0x82533670 loads from `data\audio\dynamicobject.big`.
-const DMO_BANKS: [(&str, &str); 4] = [
-    ("dynamicobject.big", "DMO_Starts.abk"),
-    ("dynamicobject.big", "Dynamics_Objects_Roll.abk"),
-    ("dynamicobject.big", "Dynamics_Objects_Slide_A.abk"),
-    ("dynamicobject.big", "Dynamics_Objects_Slide_B.abk"),
-];
-
-/// `AudioSystem::LoadMomentsData` 0x824f0e50's banks (`SecondaryLoad`): the modules of
-/// `Sk8_moments.csi`'s `fade_to_white`, `killedit_*` and `ownedit_logo`.
-const MOMENTS_BANKS: [(&str, &str); 3] = [
-    ("moments.big", "fade_to_white.abk"),
-    ("moments.big", "killed_it.abk"),
-    ("moments.big", "owned_it.abk"),
-];
 
 /// `GetHOMBank` 0x824e6a08's banks (`sHOMBankNames`), in their order.
 fn hom_banks(root: &Path) -> Result<Vec<Arc<[u8]>>, String> {
     let big = MountedBig::open(root.join("data/audio/splicercollision.big"), false).map_err(|e| format!("splicercollision.big: {e}"))?;
     skate2_audio::main_objects::HOM_BANK_NAMES.iter().map(|&name| big.read_path(name).map(Arc::from).map_err(|e| format!("{name}: {e}"))).collect()
 }
-
-/// `AudioSystem::LoadVehiclesData` 0x824fd868's banks in its `AsyncLoadAt` order: the engines
-/// (`sEngineNames`), `Traffic_Horn.abk` and `Traffic_Skid.abk` of `vehicle.big`
-/// (`mpEnginesBigFileHdr`), then `car_alarms.abk` of `emitters2.big` (`mpEmittersBigFileHdr`).
-/// `SecondaryLoad` asks for them and `Update` loads them once no crowd banks are loaded.
-const VEHICLE_BANKS: [(&str, &str); 11] = [
-    ("vehicle.big", "C00_heavy01.abk"),
-    ("vehicle.big", "C01_family01.abk"),
-    ("vehicle.big", "C03_sports01.abk"),
-    ("vehicle.big", "C04_taxi01.abk"),
-    ("vehicle.big", "C05_truck01.abk"),
-    ("vehicle.big", "C06_sports02.abk"),
-    ("vehicle.big", "C07_family02.abk"),
-    ("vehicle.big", "C08_family03.abk"),
-    ("vehicle.big", "Traffic_Horn.abk"),
-    ("vehicle.big", "Traffic_Skid.abk"),
-    ("emitters2.big", "car_alarms.abk"),
-];
 
 fn big_file(root: &Path, big: &str, name: &str) -> Result<Vec<u8>, String> {
     let archive = MountedBig::open(root.join("data/audio").join(big), false).map_err(|e| format!("{big}: {e}"))?;
@@ -251,12 +125,9 @@ fn big_file(root: &Path, big: &str, name: &str) -> Result<Vec<u8>, String> {
     archive.read_entry(entry).map_err(|e| format!("{name}: {e}"))
 }
 
-/// `Sk8EmitterSystem::LoadGameFiles` 0x824e9e00's data files, in its order.
-const EMITTER_DATA_FILES: [&str; 5] = ["sfx.ems", "reverb.ems", "music.ems", "speakers.ems", "crowds.ems"];
-
 fn aems_files(root: &Path) -> Result<AemsFiles, String> {
     let mut files = AemsFiles::default();
-    for name in EMITTER_DATA_FILES {
+    for name in skate2_audio::load::EMITTER_DATA_FILES {
         let bytes = std::fs::read(skate2_formats::host_path::on_disk(&root.join("data/audio").join(name))).map_err(|e| format!("{name}: {e}"))?;
         files.emitters.data_files.push((format!("data\\audio\\{name}"), bytes));
     }
@@ -268,19 +139,19 @@ fn aems_files(root: &Path) -> Result<AemsFiles, String> {
             files.emitters.banks.push((name.to_string(), Arc::from(bytes)));
         }
     }
-    for (big, name) in AEMS_INTERFACES {
+    for (big, name) in skate2_audio::load::AEMS_INTERFACES {
         files.interfaces.push((name.to_owned(), big_file(root, big, name)?));
     }
-    for (big, name) in AEMS_BANKS {
+    for (big, name) in skate2_audio::load::AEMS_BANKS {
         files.banks.push((name.to_owned(), Arc::from(big_file(root, big, name)?)));
     }
-    for (big, name) in DMO_BANKS {
+    for (big, name) in skate2_audio::load::DMO_BANKS {
         files.banks.push((name.to_owned(), Arc::from(big_file(root, big, name)?)));
     }
-    for (big, name) in MOMENTS_BANKS {
+    for (big, name) in skate2_audio::load::MOMENTS_BANKS {
         files.banks.push((name.to_owned(), Arc::from(big_file(root, big, name)?)));
     }
-    for (big, name) in VEHICLE_BANKS {
+    for (big, name) in skate2_audio::load::VEHICLE_BANKS {
         files.banks.push((name.to_owned(), Arc::from(big_file(root, big, name)?)));
     }
     Ok(files)
@@ -308,19 +179,33 @@ fn load_system(mounts: &MountSet) -> Result<(AudioSystem, HashMap<String, u64>),
     let banks = MountedBig::open(root.join("data/audio/splicerfe.big"), false).map_err(|e| e.to_string())?;
     let fe_bank: Arc<[u8]> = banks.read_path("Sk82_FE.bnk").map_err(|e| format!("Sk82_FE.bnk: {e}"))?.into();
     let menu_bank: Arc<[u8]> = banks.read_path("sk8_menu.bnk").map_err(|e| format!("sk8_menu.bnk: {e}"))?.into();
-    let mut world_banks = splicer_banks(&root, "splicerskateboard.big", &SKATEBOARD_BANKS)?;
-    world_banks.extend(splicer_banks(&root, "splicercollision.big", &COLLISION_BANKS)?);
-    let mix_map = std::fs::read(skate2_formats::host_path::on_disk(&root.join("data/audio/MixMapSK8.mxb"))).map_err(|e| format!("MixMapSK8.mxb: {e}"))?;
-    let grains = grain_files(&root)?;
-    let aems = aems_files(&root)?;
+    let inputs = skate2_audio::load::AudioInputs {
+        fe_bank,
+        menu_bank,
+        skateboard_banks: splicer_banks(
+            &root,
+            "splicerskateboard.big",
+            &skate2_audio::load::SKATEBOARD_BANKS,
+        )?,
+        collision_banks: splicer_banks(
+            &root,
+            "splicercollision.big",
+            &skate2_audio::load::COLLISION_BANKS,
+        )?,
+        hom_banks: hom_banks(&root)?,
+        mix_map: std::fs::read(skate2_formats::host_path::on_disk(
+            &root.join("data/audio/MixMapSK8.mxb"),
+        ))
+        .map_err(|e| format!("MixMapSK8.mxb: {e}"))?,
+        grains: grain_files(&root)?,
+        aems: aems_files(&root)?,
+        // `rw::core::filesys` for the streamed ambience beds and `ambienceresident.big`.
+        stream_files: Arc::new(skate2_audio::rwac::stream_pool::GameStreamFiles::new(
+            root.clone(),
+        )),
+    };
     let db = AttribDb::load(mounts, &["data\\db\\skater.vlt"]).map_err(|e| e.to_string())?;
-    let (sounds, globals) = fe_sounds(&db);
-    let mut system = AudioSystem::new();
-    system.set_hom_banks(hom_banks(&root)?);
-    // `rw::core::filesys` for the streamed ambience beds and `ambienceresident.big`.
-    system.set_stream_files(Arc::new(skate2_audio::rwac::stream_pool::GameStreamFiles::new(root)));
-    system.enter_world(Vault::new(Some(Box::new(VaultSource(db)))), fe_bank, menu_bank, world_banks, mix_map, sounds, grains, aems)?;
-    Ok((system, globals))
+    skate2_audio::load::load(inputs, Box::new(VaultSource(db)))
 }
 
 /// The core's `PhysOut` copy as the audio presentation reads it.

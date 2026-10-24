@@ -8,6 +8,7 @@ pub mod csis;
 pub mod formats;
 pub mod global_effects;
 pub mod grain_player;
+pub mod load;
 pub mod main_objects;
 pub mod math;
 pub mod movie;
