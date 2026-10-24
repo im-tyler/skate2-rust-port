@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
-const MIX_RATE: u32 = 48_000;
+use skate2_audio::output::MIX_RATE;
 
 /// The game root, derived from the Boot archive the way `marker_ui::Assets::load` does.
 fn game_root(mounts: &MountSet) -> Result<PathBuf, String> {
@@ -347,48 +347,27 @@ impl DeviceClock {
 struct Output {
     system: Arc<Mutex<AudioSystem>>,
     exporting: Arc<AtomicBool>,
-    pending: VecDeque<f32>,
-    block: Vec<f32>,
-    step: f64,
-    position: f64,
-    previous: [f32; 2],
-    current: [f32; 2],
+    resampler: skate2_audio::output::MixResampler,
     clock: Arc<DeviceClock>,
     device_rate: f64,
 }
 
 impl Output {
-    fn next_mix_frame(&mut self) -> [f32; 2] {
-        if self.pending.len() < 2 {
-            self.block.clear();
-            let mut system = lock(&self.system);
-            if self.exporting.load(Ordering::Acquire) {
-                return [0.; 2];
-            }
-            system.render_stereo(&mut self.block);
-            self.pending.extend(self.block.iter().copied());
-        }
-        [
-            self.pending.pop_front().unwrap_or(0.0),
-            self.pending.pop_front().unwrap_or(0.0),
-        ]
-    }
-
     fn next_frame(&mut self) -> [f32; 2] {
-        if self.step == 1.0 {
-            return self.next_mix_frame();
-        }
-        while self.position >= 1.0 {
-            self.position -= 1.0;
-            self.previous = self.current;
-            self.current = self.next_mix_frame();
-        }
-        let t = self.position as f32;
-        self.position += self.step;
-        [
-            self.previous[0] + (self.current[0] - self.previous[0]) * t,
-            self.previous[1] + (self.current[1] - self.previous[1]) * t,
-        ]
+        let Self {
+            system,
+            exporting,
+            resampler,
+            ..
+        } = self;
+        resampler.next_frame(&mut |block| {
+            let mut system = lock(system);
+            if exporting.load(Ordering::Acquire) {
+                return false;
+            }
+            system.render_stereo(block);
+            true
+        })
     }
 
     fn fill<T: cpal::SizedSample + cpal::FromSample<f32>>(
@@ -399,10 +378,7 @@ impl Output {
         self.clock
             .callback((data.len() / channels.max(1)) as f64 / self.device_rate);
         if self.exporting.load(Ordering::Acquire) {
-            self.pending.clear();
-            self.previous = [0.; 2];
-            self.current = [0.; 2];
-            self.position = 1.;
+            self.resampler.reset();
             data.fill(T::from_sample(0.));
             return;
         }
@@ -624,22 +600,12 @@ impl GameAudio {
             .ok_or("no audio output device")?;
         let supported = device.default_output_config().map_err(|e| e.to_string())?;
         let config = supported.config();
-        let step = f64::from(MIX_RATE) / f64::from(config.sample_rate);
         let clock = Arc::new(DeviceClock::default());
         let exporting = Arc::new(AtomicBool::new(false));
         let output = Output {
             system: Arc::clone(&system),
             exporting: Arc::clone(&exporting),
-            pending: VecDeque::new(),
-            block: Vec::new(),
-            step: if config.sample_rate == MIX_RATE {
-                1.0
-            } else {
-                step
-            },
-            position: 1.0,
-            previous: [0.0; 2],
-            current: [0.0; 2],
+            resampler: skate2_audio::output::MixResampler::new(config.sample_rate),
             clock: Arc::clone(&clock),
             device_rate: f64::from(config.sample_rate),
         };

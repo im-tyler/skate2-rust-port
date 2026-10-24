@@ -4,12 +4,12 @@
 # replay order. It may only go down; record an intentional drop with --update
 # in the same change. Per-crate lines are context, not enforced.
 rustc: 1.99.0
-total: 16827
+total: 16825
 #   skate2-audio: 2084
 #   skate2-core: 11476
 #   skate2-formats: 754
 #   skate2-net: 65
-#   skate2-pc: 2319
+#   skate2-pc: 2317
 #   skate2-update: 1
 #   skate2-web: 11
 #   skate2-xma: 117

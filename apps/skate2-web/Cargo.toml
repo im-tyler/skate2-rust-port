@@ -25,6 +25,13 @@ wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "=0.4.79"
 js-sys = "=0.3.106"
 web-sys = { version = "=0.3.106", features = [
+    "AudioBuffer",
+    "AudioContext",
+    "AudioContextState",
+    "AudioDestinationNode",
+    "AudioNode",
+    "AudioProcessingEvent",
+    "BaseAudioContext",
     "Blob",
     "Document",
     "Element",
@@ -44,6 +51,7 @@ web-sys = { version = "=0.3.106", features = [
     "Request",
     "RequestInit",
     "Response",
+    "ScriptProcessorNode",
     "Window",
 ] }
 console_error_panic_hook = "=0.1.7"

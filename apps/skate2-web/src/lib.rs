@@ -15,6 +15,8 @@
 mod input;
 mod scene;
 
+#[cfg(target_arch = "wasm32")]
+mod audio_out;
 #[cfg(any(target_arch = "wasm32", test))]
 mod audio_probe;
 mod boot_probe;
@@ -397,6 +399,9 @@ fn arm_audio_probe() {
         /// The audio trigger's closure, kept alive for the page's lifetime.
         static KEEP: std::cell::RefCell<Option<Listener>> =
             const { std::cell::RefCell::new(None) };
+        /// The play button's closure, likewise.
+        static PLAY: std::cell::RefCell<Option<Listener>> =
+            const { std::cell::RefCell::new(None) };
     }
     let Some(window) = web_sys::window() else {
         return;
@@ -416,14 +421,34 @@ fn arm_audio_probe() {
             line.set_text_content(Some(&final_line));
         });
     };
-    let automatic = window
-        .location()
-        .search()
-        .unwrap_or_default()
-        .strip_prefix('?')
-        .is_some_and(|query| query.split('&').any(|pair| pair == "audio=1"));
-    if automatic {
+    let query = window.location().search().unwrap_or_default();
+    let automatic = |value: &str| {
+        query
+            .strip_prefix('?')
+            .is_some_and(|query| query.split('&').any(|pair| pair == value))
+    };
+    if automatic("audio=1") {
         start();
+    }
+    // Phase 3: the press sound, audible. `?audio=play` presses once on load
+    // (a headless run lifts the autoplay gesture requirement).
+    if let Some(button) = document.get_element_by_id("audio-play") {
+        let line = document.get_element_by_id("audio-out-line");
+        let press = move || {
+            if let Some(line) = line.clone() {
+                crate::audio_out::press(pick_boot_source, line);
+            }
+        };
+        if automatic("audio=play") {
+            press();
+        }
+        let click = Closure::<dyn FnMut(web_sys::Event)>::new(move |_event: web_sys::Event| {
+            press();
+        });
+        button
+            .add_event_listener_with_callback("click", click.as_ref().unchecked_ref())
+            .ok();
+        PLAY.with(|keep| *keep.borrow_mut() = Some(click));
     }
     if let Some(button) = document.get_element_by_id("audio-probe") {
         let click = Closure::<dyn FnMut(web_sys::Event)>::new(move |_event: web_sys::Event| {

@@ -104,7 +104,7 @@
       z-index: 5;
     }
     #pick-folder:hover { border-color: var(--accent); }
-    #boot-probe, #audio-probe {
+    #boot-probe, #audio-probe, #audio-play {
       position: absolute;
       bottom: 54px;
       right: 12px;
@@ -119,8 +119,9 @@
       z-index: 5;
     }
     #audio-probe { bottom: 96px; }
-    #boot-probe:hover, #audio-probe:hover { border-color: var(--accent); }
-    #boot-line, #audio-line {
+    #audio-play { bottom: 138px; }
+    #boot-probe:hover, #audio-probe:hover, #audio-play:hover { border-color: var(--accent); }
+    #boot-line, #audio-line, #audio-out-line {
       color: var(--accent);
       padding-top: 6px;
       white-space: pre-wrap;
@@ -194,12 +195,14 @@
   <button id="pick-folder">Load game folder…</button>
   <button id="boot-probe">Run boot probe</button>
   <button id="audio-probe">Run audio probe</button>
+  <button id="audio-play">Play pause-menu sound</button>
 
   <div id="assets">
     <div class="row"><span class="k">game data</span><span id="assets-found">—</span></div>
     <div id="assets-archives"></div>
     <div id="boot-line"></div>
     <div id="audio-line"></div>
+    <div id="audio-out-line"></div>
   </div>
 </body>
 </html>

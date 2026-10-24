@@ -64,6 +64,16 @@ pub fn frame_hash(frames: &[f32]) -> u64 {
     hash
 }
 
+/// The oracle script's press: free-skate state, then
+/// `Audio.PlaySound(FE_SOUND_PAUSE_MENU_PRESS)` — what a live host plays.
+pub fn pause_menu_press(system: &mut AudioSystem, key: u64) {
+    system.state = GameAudioState {
+        hud_state: hud_state::FREE_SKATE,
+        ..GameAudioState::default()
+    };
+    system.global_fe_play_sound(key, false);
+}
+
 /// The oracle script: the pause-menu press sound over 180 ticks of free-skate
 /// state — `Audio.PlaySound(FE_SOUND_PAUSE_MENU_PRESS)`, then the same
 /// update/render cadence the pc corpus test drives (one update per 60 Hz tick,
@@ -71,11 +81,7 @@ pub fn frame_hash(frames: &[f32]) -> u64 {
 /// hash and their count. The system must have been built with
 /// [`ORACLE_SEEDS`] and [`AbsentStreams`].
 pub fn pause_menu_press_render(system: &mut AudioSystem, key: u64) -> (u64, usize) {
-    system.state = GameAudioState {
-        hud_state: hud_state::FREE_SKATE,
-        ..GameAudioState::default()
-    };
-    system.global_fe_play_sound(key, false);
+    pause_menu_press(system, key);
     let mut stereo = Vec::new();
     let mut mixed = 0.0_f64;
     for tick in 0..180 {

@@ -200,9 +200,17 @@ Commit: `Web port step six (d): the pause-menu sound renders the native hash in 
 
 ### Phase 3 — audio audible: the Web Audio pull
 
-Files: `apps/skate2-web/src/audio_probe.rs`, `src/lib.rs`, `index.html`,
-`Cargo.toml` (web-sys `AudioContext`, `ScriptProcessorNode`,
-`AudioNode`, `AudioDestinationNode`, `BaseAudioContext` features).
+Files: `apps/skate2-web/src/audio_out.rs` (new; the player),
+`src/audio_probe.rs` (split into fetch / build / render so the player
+reuses them), `src/lib.rs`, `index.html`, `Cargo.toml` (web-sys
+`AudioContext`, `AudioContextState`, `ScriptProcessorNode`,
+`AudioProcessingEvent`, `AudioBuffer`, `AudioNode`,
+`AudioDestinationNode`, `BaseAudioContext` features);
+`crates/skate2-audio/src/output.rs` (new: the pc `Output`'s queue and
+linear resampler as `MixResampler`, used by both hosts — amended so the
+tab pulls "exactly as `Output::fill` does" without a copy) and
+`oracle::pause_menu_press` (the script's press step, which the player
+plays).
 
 - A `ScriptProcessorNode` pull on the main thread — the thread the
   single-threaded wasm system lives on; no `SharedArrayBuffer`. The

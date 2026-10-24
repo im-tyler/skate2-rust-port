@@ -15,6 +15,7 @@ pub mod movie;
 pub mod music;
 pub mod nicotine;
 pub mod oracle;
+pub mod output;
 pub mod player;
 pub mod presentation;
 pub mod random;

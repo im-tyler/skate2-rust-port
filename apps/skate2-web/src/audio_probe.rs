@@ -167,42 +167,63 @@ pub(crate) struct OracleRun {
     pub(crate) misses: usize,
 }
 
-/// Builds the audio system over the probe's archives and loose files through
-/// `skate2_audio::load` with the oracle's seeds and counted absent streams,
-/// and renders the oracle script.
-pub(crate) fn run_oracle(
-    audio: &[ProbeArchive],
-    db: &ProbeArchive,
-    loose: &BTreeMap<String, Vec<u8>>,
-) -> Result<OracleRun, String> {
+/// Everything the loader reads, resident: the span-mounted `data\audio`
+/// archives, `db.big` with the vault's spans, and the loose files.
+pub(crate) struct AudioBytes {
+    pub(crate) audio: Vec<ProbeArchive>,
+    pub(crate) db: ProbeArchive,
+    pub(crate) loose: BTreeMap<String, Vec<u8>>,
+}
+
+/// An audio system built from [`AudioBytes`] with the oracle's seeds and
+/// counted absent streams, and its pause-menu press key.
+pub(crate) struct Built {
+    pub(crate) system: skate2_audio::system::AudioSystem,
+    pub(crate) key: u64,
+    streams: Arc<CountedAbsentStreams>,
+}
+
+/// Builds the audio system through `skate2_audio::load`: `read_inputs` over
+/// the span mounts, `AttribDb::load` over the span-mounted `db.big`.
+pub(crate) fn build(bytes: &AudioBytes) -> Result<Built, String> {
     let streams = Arc::new(CountedAbsentStreams::default());
     let inputs = load::read_inputs(
         &SpanAudio {
-            archives: audio,
-            loose,
+            archives: &bytes.audio,
+            loose: &bytes.loose,
         },
         Arc::clone(&streams) as Arc<dyn StreamFiles>,
     )?;
     let mut mounts = MountSet::new();
-    mounts.push(db.mounted());
+    mounts.push(bytes.db.mounted());
     let vault = skate2_core::challenge::attrib_db::AttribDb::load(&mounts, &[SKATER_VLT])
         .map_err(|error| error.to_string())?;
-    let (mut system, globals) =
-        load::load_with_seeds(inputs, Box::new(vault), oracle::ORACLE_SEEDS)?;
+    let (system, globals) = load::load_with_seeds(inputs, Box::new(vault), oracle::ORACLE_SEEDS)?;
     let key = *globals
         .get("FE_SOUND_PAUSE_MENU_PRESS")
         .ok_or("skater.vlt has no FE_SOUND_PAUSE_MENU_PRESS")?;
-    let (hash, frames) = oracle::pause_menu_press_render(&mut system, key);
-    let misses = audio
+    Ok(Built {
+        system,
+        key,
+        streams,
+    })
+}
+
+/// [`build`], then the oracle script's render.
+pub(crate) fn run_oracle(bytes: &AudioBytes) -> Result<OracleRun, String> {
+    let mut built = build(bytes)?;
+    let (hash, frames) = oracle::pause_menu_press_render(&mut built.system, built.key);
+    let misses = bytes
+        .audio
         .iter()
-        .chain(std::iter::once(db))
+        .chain(std::iter::once(&bytes.db))
         .map(|archive| archive.spans.misses().len())
         .sum();
     Ok(OracleRun {
         hash,
         frames,
-        stream_sizes: streams.sizes.load(Ordering::Relaxed),
-        stream_reads: streams.reads.load(Ordering::Relaxed),
+        stream_sizes: built.streams.sizes.load(Ordering::Relaxed),
+        stream_reads: built.streams.reads.load(Ordering::Relaxed),
         misses,
     })
 }
@@ -229,26 +250,40 @@ pub(crate) fn verdict(run: &OracleRun) -> String {
     }
 }
 
-/// The tab's driver: tables over ranges, the planned spans fetched, the loose
-/// files read whole, then [`run_oracle`]. Progress lands in `line`.
+/// The tab's driver: [`fetch`], then [`run_oracle`]. Progress lands in `line`.
 #[cfg(target_arch = "wasm32")]
 pub(crate) async fn run_audio_probe<S: crate::game_files::ByteSource + ?Sized>(
     source: &S,
     line: &web_sys::Element,
 ) -> String {
-    match fetch_and_run(source, line).await {
-        Ok(text) => text,
-        Err(problem) => format!("audio probe: {problem}"),
-    }
+    let run = async {
+        let started = seconds_now();
+        let (bytes, fetched) = fetch(source, line).await?;
+        let fetch_seconds = seconds_now() - started;
+        line.set_text_content(Some("audio probe: rendering…"));
+        yield_to_event_loop().await;
+        let render_start = seconds_now();
+        let run = run_oracle(&bytes)?;
+        Ok::<_, String>(format!(
+            "{}; fetched {} in {fetch_seconds:.1}s, built and rendered in {:.1}s",
+            verdict(&run),
+            format_mib(fetched),
+            seconds_now() - render_start
+        ))
+    };
+    run.await
+        .unwrap_or_else(|problem| format!("audio probe: {problem}"))
 }
 
+/// The loader's bytes over the page's source: the tables of
+/// `load::ARCHIVES` and `db.big` over ranges, the planned spans, the loose
+/// files whole. Returns them and the byte count fetched.
 #[cfg(target_arch = "wasm32")]
-async fn fetch_and_run<S: crate::game_files::ByteSource + ?Sized>(
+pub(crate) async fn fetch<S: crate::game_files::ByteSource + ?Sized>(
     source: &S,
     line: &web_sys::Element,
-) -> Result<String, String> {
+) -> Result<(AudioBytes, u64), String> {
     use crate::game_files::RemoteArchive;
-    let started = seconds_now();
     let mut fetched = 0_u64;
     let mut audio = Vec::new();
     for name in load::ARCHIVES {
@@ -259,7 +294,7 @@ async fn fetch_and_run<S: crate::game_files::ByteSource + ?Sized>(
             fetched += fetch_span(source, &archive, range).await?;
         }
         line.set_text_content(Some(&format!(
-            "audio probe: fetching… {name} ({})",
+            "audio: fetching… {name} ({})",
             format_mib(fetched)
         )));
         audio.push(archive);
@@ -282,17 +317,7 @@ async fn fetch_and_run<S: crate::game_files::ByteSource + ?Sized>(
         fetched += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         loose.insert(name.to_owned(), bytes);
     }
-    let fetch_seconds = seconds_now() - started;
-    line.set_text_content(Some("audio probe: rendering…"));
-    yield_to_event_loop().await;
-    let render_start = seconds_now();
-    let run = run_oracle(&audio, &db, &loose)?;
-    Ok(format!(
-        "{}; fetched {} in {fetch_seconds:.1}s, built and rendered in {:.1}s",
-        verdict(&run),
-        format_mib(fetched),
-        seconds_now() - render_start
-    ))
+    Ok((AudioBytes { audio, db, loose }, fetched))
 }
 
 /// Fetches one stored span and makes it resident; returns its size.
@@ -311,7 +336,7 @@ async fn fetch_span<S: crate::game_files::ByteSource + ?Sized>(
 }
 
 #[cfg(target_arch = "wasm32")]
-fn seconds_now() -> f64 {
+pub(crate) fn seconds_now() -> f64 {
     web_sys::window()
         .and_then(|window| window.performance())
         .map_or_else(
@@ -322,7 +347,7 @@ fn seconds_now() -> f64 {
 
 /// A `setTimeout 0` yield, so the panel paints before the render.
 #[cfg(target_arch = "wasm32")]
-async fn yield_to_event_loop() {
+pub(crate) async fn yield_to_event_loop() {
     let promise = js_sys::Promise::new(
         &mut |resolve: js_sys::Function, _reject: js_sys::Function| {
             if let Some(window) = web_sys::window() {
@@ -335,7 +360,7 @@ async fn yield_to_event_loop() {
 
 /// A byte count as `MiB` with one decimal, for the panel.
 #[cfg(target_arch = "wasm32")]
-fn format_mib(bytes: u64) -> String {
+pub(crate) fn format_mib(bytes: u64) -> String {
     const MIB: u64 = 1024 * 1024;
     format!("{}.{} MiB", bytes / MIB, bytes % MIB * 10 / MIB)
 }
@@ -387,7 +412,7 @@ mod tests {
                 loose.insert(name.to_owned(), bytes);
             }
         }
-        let run = run_oracle(&audio, &db, &loose).unwrap();
+        let run = run_oracle(&AudioBytes { audio, db, loose }).unwrap();
         eprintln!("{}", verdict(&run));
         assert_eq!(run.misses, 0, "a read outside the planned spans");
         assert_eq!(run.stream_reads, 0, "a stream byte was asked for");
