@@ -23,6 +23,8 @@ mod boot_probe;
 #[cfg(target_arch = "wasm32")]
 mod game_files;
 #[cfg(target_arch = "wasm32")]
+mod online;
+#[cfg(target_arch = "wasm32")]
 mod vault;
 
 use input::{PadSource, WebPadPlatform};
@@ -218,6 +220,7 @@ pub fn start() -> Result<(), wasm_bindgen::JsValue> {
     arm_assets_panel();
     arm_boot_probe();
     arm_audio_probe();
+    arm_online();
     // Say it plainly before wgpu's adapter request fails obscurely.
     let gpu = js_sys::Reflect::get(
         &(window.navigator().into()),
@@ -453,6 +456,73 @@ fn arm_audio_probe() {
     if let Some(button) = document.get_element_by_id("audio-probe") {
         let click = Closure::<dyn FnMut(web_sys::Event)>::new(move |_event: web_sys::Event| {
             start();
+        });
+        button
+            .add_event_listener_with_callback("click", click.as_ref().unchecked_ref())
+            .ok();
+        KEEP.with(|keep| *keep.borrow_mut() = Some(click));
+    }
+}
+
+/// Arms the online join (`docs/WEB_PORT_M6_PLAN.md`, phase 5b): the "Join
+/// server" button over the bridge URL and nickname fields, and
+/// `?server=<bridge ws url>` (with an optional `&nick=`) for the automatic
+/// verification run.
+#[cfg(target_arch = "wasm32")]
+fn arm_online() {
+    use wasm_bindgen::{JsCast, closure::Closure};
+    /// One event-listener closure, kept for the page's lifetime.
+    type Listener = Closure<dyn FnMut(web_sys::Event)>;
+    thread_local! {
+        /// The join button's closure, kept alive for the page's lifetime.
+        static KEEP: std::cell::RefCell<Option<Listener>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let (Some(line), Some(url_field), Some(nick_field)) = (
+        document.get_element_by_id("online-line"),
+        document
+            .get_element_by_id("server-url")
+            .and_then(|element| element.dyn_into::<web_sys::HtmlInputElement>().ok()),
+        document
+            .get_element_by_id("nickname")
+            .and_then(|element| element.dyn_into::<web_sys::HtmlInputElement>().ok()),
+    ) else {
+        return;
+    };
+    let query = window.location().search().unwrap_or_default();
+    let parameter = |name: &str| {
+        query.strip_prefix('?').and_then(|query| {
+            query
+                .split('&')
+                .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
+                .map(|value| {
+                    js_sys::decode_uri_component(value)
+                        .map_or_else(|_| value.to_owned(), String::from)
+                })
+        })
+    };
+    if let Some(nick) = parameter("nick") {
+        nick_field.set_value(&nick);
+    }
+    let join = move |url: String, nick: String| {
+        line.set_text_content(Some(&format!("online: connecting to {url}…")));
+        if let Err(problem) = crate::online::join(&url, &nick, line.clone()) {
+            line.set_text_content(Some(&format!("online: {problem}")));
+        }
+    };
+    if let Some(url) = parameter("server") {
+        url_field.set_value(&url);
+        join(url, nick_field.value());
+    }
+    if let Some(button) = document.get_element_by_id("join-server") {
+        let click = Closure::<dyn FnMut(web_sys::Event)>::new(move |_event: web_sys::Event| {
+            join(url_field.value(), nick_field.value());
         });
         button
             .add_event_listener_with_callback("click", click.as_ref().unchecked_ref())

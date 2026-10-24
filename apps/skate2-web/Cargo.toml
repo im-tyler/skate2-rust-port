@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 skate2-audio = { path = "../../crates/skate2-audio" }
 skate2-core = { path = "../../crates/skate2-core", features = ["audio"] }
 skate2-formats = { path = "../../crates/skate2-formats" }
+skate2-net = { path = "../../crates/skate2-net" }
 wgpu = "=30.0.1"
 winit = "=0.29.15"
 
@@ -32,6 +33,7 @@ web-sys = { version = "=0.3.106", features = [
     "AudioNode",
     "AudioProcessingEvent",
     "BaseAudioContext",
+    "BinaryType",
     "Blob",
     "Document",
     "Element",
@@ -45,6 +47,7 @@ web-sys = { version = "=0.3.106", features = [
     "HtmlCanvasElement",
     "HtmlInputElement",
     "Location",
+    "MessageEvent",
     "Navigator",
     "Node",
     "Performance",
@@ -52,9 +55,12 @@ web-sys = { version = "=0.3.106", features = [
     "RequestInit",
     "Response",
     "ScriptProcessorNode",
+    "WebSocket",
     "Window",
 ] }
 console_error_panic_hook = "=0.1.7"
+# skate2-net's clock on wasm32, where `std::time::Instant` traps.
+web-time = "=1.1.0"
 # skate2-net's cryptography needs randomness; on wasm32-unknown-unknown getrandom
 # only compiles with this feature plus the `--cfg getrandom_backend="wasm"` flag
 # (see .cargo/config.toml and docs/WEB_PORT.md).

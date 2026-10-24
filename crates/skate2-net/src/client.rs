@@ -99,6 +99,12 @@ impl ClientCore {
         matches!(self.state, State::Closed)
     }
 
+    /// The newest of the player's frame ticks the server acknowledged (`FrameAck`).
+    #[must_use]
+    pub fn frames_acknowledged(&self) -> Option<u32> {
+        self.own_frames.acknowledged()
+    }
+
     /// The last ping's round trip.
     #[must_use]
     pub fn rtt(&self) -> Option<Duration> {

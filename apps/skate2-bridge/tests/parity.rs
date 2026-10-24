@@ -198,6 +198,12 @@ impl<L: Link> Session<L> {
             self.pump_until(45, |_| false);
         }
         self.pump_until(500, |_| false);
+        // Acks arrive on the wire's timing, so their tick is not compared,
+        // only that the server acknowledged the run on either path.
+        assert!(
+            self.core.frames_acknowledged().is_some(),
+            "no frame acknowledged"
+        );
         assert!(
             !self.core.is_closed(),
             "the session closed: {:?}",

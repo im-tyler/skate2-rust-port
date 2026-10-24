@@ -772,6 +772,12 @@ impl AckState {
         }
     }
 
+    /// The newest tick the receiver reported holding.
+    #[must_use]
+    pub fn latest(&self) -> Option<u32> {
+        self.latest
+    }
+
     #[must_use]
     pub fn holds(&self, tick: u32) -> bool {
         let Some(latest) = self.latest else { return false };
@@ -835,6 +841,12 @@ impl FrameSender {
 
     pub fn acknowledge(&mut self, latest: u32, mask: u32) {
         self.acks.update(latest, mask);
+    }
+
+    /// The newest of this sender's ticks the receiver acknowledged.
+    #[must_use]
+    pub fn acknowledged(&self) -> Option<u32> {
+        self.acks.latest()
     }
 
     pub fn reset(&mut self) {

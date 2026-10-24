@@ -120,8 +120,25 @@
     }
     #audio-probe { bottom: 96px; }
     #audio-play { bottom: 138px; }
+    #online {
+      position: absolute;
+      bottom: 180px;
+      right: 12px;
+      z-index: 5;
+    }
+    #online input, #online button {
+      background: var(--panel);
+      border: 1px solid #2a2f38;
+      border-radius: 10px;
+      color: var(--ink);
+      font: inherit;
+      font-size: 13px;
+      padding: 8px 10px;
+    }
+    #online button { cursor: pointer; }
+    #online button:hover { border-color: var(--accent); }
     #boot-probe:hover, #audio-probe:hover, #audio-play:hover { border-color: var(--accent); }
-    #boot-line, #audio-line, #audio-out-line {
+    #boot-line, #audio-line, #audio-out-line, #online-line {
       color: var(--accent);
       padding-top: 6px;
       white-space: pre-wrap;
@@ -196,6 +213,11 @@
   <button id="boot-probe">Run boot probe</button>
   <button id="audio-probe">Run audio probe</button>
   <button id="audio-play">Play pause-menu sound</button>
+  <div id="online">
+    <input id="server-url" placeholder="ws://127.0.0.1:8787" size="22">
+    <input id="nickname" value="WebSkater" maxlength="24" size="12">
+    <button id="join-server">Join server</button>
+  </div>
 
   <div id="assets">
     <div class="row"><span class="k">game data</span><span id="assets-found">—</span></div>
@@ -203,6 +225,7 @@
     <div id="boot-line"></div>
     <div id="audio-line"></div>
     <div id="audio-out-line"></div>
+    <div id="online-line"></div>
   </div>
 </body>
 </html>

@@ -2396,9 +2396,11 @@ dependencies = [
  "skate2-audio",
  "skate2-core",
  "skate2-formats",
+ "skate2-net",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "web-time 1.1.0",
  "wgpu",
  "winit",
 ]

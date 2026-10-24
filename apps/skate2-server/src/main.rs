@@ -10,6 +10,7 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let build = skate2_net::crypto::Build::from_hex(env!("SKATE2_BUILD_SECRET")).unwrap_or(skate2_net::crypto::Build::DEVELOPMENT);
+    let build = verification_build(build);
     build.install();
     let update = skate2_update::Config::for_build(
         option_env!("SKATE2_UPDATE_PUBLIC_KEY"),
@@ -32,5 +33,28 @@ fn main() -> ExitCode {
             eprintln!("dedicated server failed: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// `SKATE2_SERVER_BUILD=development`: the browser build has no build script, so it presents
+/// `Build::DEVELOPMENT`, which a development server's random secret refuses
+/// (`docs/WEB_PORT_M6_PLAN.md`, phase 5b). A development server run for that verification takes
+/// the development build instead. A release build — one carrying its update public key — never
+/// does: its secret is the release's, and the variable is reported and ignored.
+fn verification_build(build: skate2_net::crypto::Build) -> skate2_net::crypto::Build {
+    match std::env::var("SKATE2_SERVER_BUILD").as_deref() {
+        Ok("development") if option_env!("SKATE2_UPDATE_PUBLIC_KEY").is_none() => {
+            eprintln!(
+                "SKATE2_SERVER_BUILD=development: accepting development-build clients (verification only)"
+            );
+            skate2_net::crypto::Build::DEVELOPMENT
+        }
+        Ok(value) => {
+            eprintln!(
+                "SKATE2_SERVER_BUILD={value} ignored: only a development build of the server takes `development`"
+            );
+            build
+        }
+        Err(_) => build,
     }
 }
